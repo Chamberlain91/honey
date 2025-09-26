@@ -1,0 +1,15 @@
+# Windows build artifacts
+*.exe
+*.pdb
+
+# Linux build artifacts
+*.out
+
+# Generic build artifacts
+*.spv
+
+# Runtime artifacts
+latest.log
+
+# IDE artifacts
+.vscode
