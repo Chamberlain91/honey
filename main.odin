@@ -23,18 +23,23 @@ main :: proc() {
     texture := ray.LoadTextureFromImage(image)
     defer ray.UnloadTexture(texture)
 
+    screen = {
+        pixels = cast([^]Color)image.data,
+        width  = cast(int)image.width,
+        height = cast(int)image.height,
+    }
+
     // Main loop.
     main_loop: for !ray.WindowShouldClose() {
 
         // Populate image data for this frame.
-        pixels := (cast([^]ray.Color)image.data)[:image.width * image.height]
-        for y in 0 ..< image.height {
-            for x in 0 ..< image.width {
+        for y in 0 ..< screen.height {
+            for x in 0 ..< screen.width {
 
                 r := cast(u8)(cast(f32)x / cast(f32)image.width * 0xFF)
                 g := cast(u8)(cast(f32)y / cast(f32)image.height * 0xFF)
 
-                pixels[(y * image.width) + x] = ray.Color{r, g, 0, 0xFF}
+                set_pixel(x, y, Color{r, g, 0, 0xFF})
             }
         }
 
@@ -52,4 +57,19 @@ main :: proc() {
             break main_loop
         }
     }
+}
+
+Color :: ray.Color
+
+screen: struct {
+    pixels:        [^]Color,
+    width, height: int,
+}
+
+set_pixel :: #force_inline proc(x, y: int, color: Color) #no_bounds_check {
+    screen.pixels[(y * screen.width) + x] = color
+}
+
+get_pixel :: #force_inline proc(x, y: int) -> Color #no_bounds_check {
+    return screen.pixels[(y * screen.width) + x]
 }
