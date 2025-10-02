@@ -6,45 +6,21 @@ import "base:intrinsics"
 import "core:math/linalg"
 import "core:mem"
 import "core:simd"
-import ray "vendor:raylib"
 
 main :: proc() {
 
     fmt.printfln("has-hardware-simd: {}", simd.HAS_HARDWARE_SIMD)
-    fmt.println("--------")
 
     // Initialize window.
-    ray.InitWindow(SCREEN_W * FACTOR, SCREEN_H * FACTOR, "Honey Software Renderer")
-    defer ray.CloseWindow()
-
-    // Match monitor FPS.
-    // ray.SetTargetFPS(ray.GetMonitorRefreshRate(ray.GetCurrentMonitor()))
-
-    // Construct screen image.
-    {
-        screen_image := ray.GenImageColor(SCREEN_W, SCREEN_H, ray.RED)
-        defer ray.UnloadImage(screen_image)
-
-        screen = {
-            base_image = image_clone_aligned(
-                (cast([^]Color)screen_image.data)[0:SCREEN_W * SCREEN_H],
-                SCREEN_W,
-                SCREEN_H,
-            ),
-            texture    = ray.LoadTextureFromImage(screen_image),
-            min        = {0.0, 0.0},
-            max        = {cast(f32)(screen_image.width - 1), cast(f32)(screen_image.height - 1)},
-        }
-    }
-
-    defer ray.UnloadTexture(screen.texture)
+    initialize_window(SCREEN_W * FACTOR, SCREEN_H * FACTOR, "Honey Software Renderer")
+    defer destroy_window()
 
     // ...
     assets.image1 = image_load("kenney.png")
     assets.image2 = image_load("kenney2.png")
 
-    w := cast(f32)assets.image1.width / 2.0
-    h := cast(f32)assets.image1.height / 2.0
+    w := cast(f32)assets.image1.size.x / 2.0
+    h := cast(f32)assets.image1.size.y / 2.0
 
     mesh := Mesh(Vertex) {
         vertices = {
@@ -57,49 +33,32 @@ main :: proc() {
     }
 
     // Main loop.
-    main_loop: for !ray.WindowShouldClose() {
+    main_loop: for is_window_open() {
 
         // Populate image data for this frame.
-        for y in 0 ..< screen.height {
-            for x in 0 ..< screen.width {
-                image_set_pixel(screen, x, y, ray.DARKGRAY)
-            }
-        }
+        image_clear(screen, transmute(Color)(u32(0xFF181818)))
 
-        wiggle := cast(f32)(math.sin(ray.GetTime()) + 1.0) / 2.0
+        wiggle := (math.sin(get_time()) + 1.0) / 2.0
 
         // Render mesh.
         transform :=
-            linalg.matrix_ortho3d_f32(0, cast(f32)screen.width, 0, cast(f32)screen.height, -1, 1) *
+            linalg.matrix_ortho3d_f32(0, cast(f32)screen.size.x, 0, cast(f32)screen.size.y, -1, 1) *
             linalg.matrix4_translate_f32({w, h, 0}) *
             linalg.matrix4_scale_f32({0.66, 0.66, 0.66}) *
             linalg.matrix4_rotate_f32(wiggle, {0.0, 0.0, 1.0})
 
         render_mesh(mesh, assets.image1, transform)
 
-        // Update texture with image contents.
-        ray.UpdateTexture(screen.texture, raw_data(screen.data))
-
-        info := fmt.ctprintf(
-            "{:0.2f} ms ({} fps), use-simd: {}",
-            1000.0 / cast(f32)ray.GetFPS(),
-            ray.GetFPS(),
-            toggles.use_simd,
-        )
-
-        // Flush texture to the screen.
-        ray.BeginDrawing()
-        ray.DrawTextureEx(screen.texture, {0, 0}, 0, FACTOR, ray.WHITE)
-        ray.DrawText(info, 10, 10, 20, ray.WHITE)
-        ray.EndDrawing()
+        status := fmt.tprintf("use-simd: {}", toggles.use_simd)
+        update_screen_pixels(status)
 
         // Exit when pressing escape.
-        if ray.IsKeyPressed(.ESCAPE) {
+        if is_key_pressed(.ESCAPE) {
             break main_loop
         }
 
         // Toggle SIMD code paths.
-        if ray.IsKeyPressed(.Z) {
+        if is_key_pressed(.Z) {
             toggles.use_simd = !toggles.use_simd
         }
     }
@@ -109,12 +68,6 @@ SCREEN_W :: 960
 SCREEN_H :: 540
 FACTOR :: 2
 
-screen: struct {
-    using base_image: Image,
-    texture:          ray.Texture2D,
-    min, max:         Vector2,
-}
-
 assets: struct {
     image1: Image,
     image2: Image,
@@ -123,109 +76,7 @@ assets: struct {
 toggles: struct {
     use_simd: bool,
 } = {
-    use_simd = false,
-}
-
-// -----------------------------------------------------------------------------
-
-Vector2 :: ray.Vector2
-Vector3 :: ray.Vector3
-Vector4 :: ray.Vector4
-Matrix :: matrix[4, 4]f32
-
-// -----------------------------------------------------------------------------
-
-Color :: ray.Color
-
-color_mix :: ray.ColorLerp
-
-// -----------------------------------------------------------------------------
-
-Image :: struct {
-    data:          []Color,
-    width, height: int,
-    simd:          struct {
-        begin: #simd[4]uintptr,
-        end:   #simd[4]uintptr,
-    },
-}
-
-image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
-
-    count := w * h
-
-    aligned_memory, err := mem.make_aligned([]Color, count, 16)
-    if err != .None {
-        fmt.panicf("Unable to allocate aligned image memory: {}", err)
-    }
-
-    copy(aligned_memory, pixels)
-
-    image := Image {
-        data = aligned_memory,
-        width = w,
-        height = h,
-        simd = {     //
-            begin = cast(uintptr)raw_data(aligned_memory),
-            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(count * size_of(Color)),
-        },
-    }
-
-    return image
-}
-
-image_load :: proc(path: cstring) -> Image {
-
-    ray_image := ray.LoadImage(path)
-    defer ray.UnloadImage(ray_image)
-
-    return image_clone_aligned(
-        (cast([^]Color)ray_image.data)[:ray_image.width * ray_image.height],
-        cast(int)ray_image.width,
-        cast(int)ray_image.height,
-    )
-}
-
-image_set_pixel :: #force_inline proc(image: Image, x, y: int, color: Color) #no_bounds_check {
-    image_get_pixel_ptr(image, x, y)[0] = color
-}
-
-image_get_pixel :: #force_inline proc(image: Image, x, y: int) -> Color #no_bounds_check {
-    return image_get_pixel_ptr(image, x, y)[0]
-}
-
-image_get_pixel_ptr :: #force_inline proc(image: Image, x, y: int) -> [^]Color #no_bounds_check {
-    return raw_data(image.data)[(y * image.width) + x:]
-}
-
-// Nearest sample an image.
-image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
-
-    x := cast(int)(uv.x * cast(f32)(image.width - 1))
-    y := cast(int)(uv.y * cast(f32)(image.height - 1))
-
-    return image_get_pixel(image, x, y)
-}
-
-// Nearest sample an image using SIMD operations.
-image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
-
-    U, V := U, V
-
-    U = simd.clamp(U, 0, 1)
-    V = simd.clamp(V, 0, 1)
-
-    // Computes the offset within the image data.
-    xs := cast(#simd[4]i32)(U * cast(f32)(image.width - 1))
-    ys := cast(#simd[4]i32)(V * cast(f32)(image.height - 1))
-    offsets := (ys * cast(i32)image.width) + xs
-
-    // Read the requested image data.
-    addrs := image.simd.begin + cast(#simd[4]uintptr)(offsets * size_of(Color))
-    // Ensure pointers valid to access.
-    addrs = simd.clamp(addrs, image.simd.begin, image.simd.end)
-
-    return simd.gather(cast(#simd[4]rawptr)addrs, simd.u32x4(0), simd.u32x4(1))
+    use_simd = true,
 }
 
 // -----------------------------------------------------------------------------
@@ -301,8 +152,8 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
 
         pos := (ndc.xy + 1.0) / 2.0
-        pos.x *= cast(f32)screen.width
-        pos.y *= cast(f32)screen.height
+        pos.x *= cast(f32)screen.size.x
+        pos.y *= cast(f32)screen.size.y
 
         return {pos.x, pos.y, ndc.z, ndc.w}
     }
@@ -314,13 +165,15 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
 rasterize_triangle :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #no_bounds_check {
 
+    screen_size := linalg.array_cast(screen.size, f32)
+
     // Find triangle bounds.
     triangle_min := linalg.min(v0, v1, v2)
     triangle_max := linalg.max(v0, v1, v2)
 
     // Clamp triangle bounds to screen bounds.
-    triangle_min = linalg.clamp(triangle_min, screen.min, screen.max)
-    triangle_max = linalg.clamp(triangle_max, screen.min, screen.max)
+    triangle_min = linalg.clamp(triangle_min, 0, screen_size)
+    triangle_max = linalg.clamp(triangle_max, 0, screen_size)
 
     ab12 := v1.xy - v2.xy
     ab20 := v2.xy - v0.xy
@@ -373,8 +226,9 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
     triangle_max := linalg.max(v0, v1, v2)
 
     // Clamp triangle bounds to screen bounds.
-    triangle_min = linalg.clamp(triangle_min, screen.min, screen.max)
-    triangle_max = linalg.clamp(triangle_max, screen.min, screen.max)
+    screen_size := linalg.array_cast(screen.size, f32)
+    triangle_min = linalg.clamp(triangle_min, 0, screen_size)
+    triangle_max = linalg.clamp(triangle_max, 0, screen_size)
 
     // SIMD reads and writes need to be 16 byte aligned.
     align_min_x := cast(f32)mem.align_backward_int(cast(int)triangle_min.x, 4)
