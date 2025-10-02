@@ -6,7 +6,6 @@ import "base:intrinsics"
 import "core:math/linalg"
 import "core:mem"
 import "core:simd"
-import "core:simd/x86"
 import ray "vendor:raylib"
 
 main :: proc() {
@@ -21,38 +20,38 @@ main :: proc() {
     // Match monitor FPS.
     // ray.SetTargetFPS(ray.GetMonitorRefreshRate(ray.GetCurrentMonitor()))
 
-    // Construct image.
-    screen_image := ray.GenImageColor(SCREEN_W, SCREEN_H, ray.RED)
-    defer ray.UnloadImage(screen_image)
+    // Construct screen image.
+    {
+        screen_image := ray.GenImageColor(SCREEN_W, SCREEN_H, ray.RED)
+        defer ray.UnloadImage(screen_image)
 
-    // Construct texture from image.
-    screen_texture := ray.LoadTextureFromImage(screen_image)
-    defer ray.UnloadTexture(screen_texture)
-
-    screen_w := cast(int)screen_image.width
-    screen_h := cast(int)screen_image.height
-
-    screen = {
-        width = screen_w,
-        height = screen_h,
-        data = (cast([^]Color)screen_image.data)[0:screen_w * screen_h],
-        simd = {     //
-            data = cast(#simd[4]uintptr)screen_image.data,
-        },
-        min = {0.0, 0.0},
-        max = {cast(f32)screen_image.width, cast(f32)screen_image.height},
+        screen = {
+            base_image = image_clone_aligned(
+                (cast([^]Color)screen_image.data)[0:SCREEN_W * SCREEN_H],
+                SCREEN_W,
+                SCREEN_H,
+            ),
+            texture    = ray.LoadTextureFromImage(screen_image),
+            min        = {0.0, 0.0},
+            max        = {cast(f32)(screen_image.width - 1), cast(f32)(screen_image.height - 1)},
+        }
     }
+
+    defer ray.UnloadTexture(screen.texture)
 
     // ...
     assets.image1 = image_load("kenney.png")
     assets.image2 = image_load("kenney2.png")
 
+    w := cast(f32)assets.image1.width / 2.0
+    h := cast(f32)assets.image1.height / 2.0
+
     mesh := Mesh(Vertex) {
         vertices = {
-            Vertex{position = {-0.3, -0.5, 0}, uv = {0, 0}, color = {1.0, 0.0, 0.0, 1.0}},
-            Vertex{position = {+1, -1, 0}, uv = {1, 0}, color = {0.0, 1.0, 0.0, 1.0}},
-            Vertex{position = {+0.8, +0.8, 0}, uv = {1, 1}, color = {0.0, 0.0, 1.0, 1.0}},
-            Vertex{position = {-1, +1, 0}, uv = {0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+            Vertex{position = {-w, -h, 0}, uv = {0, 0}, color = {1.0, 0.0, 0.0, 1.0}},
+            Vertex{position = {+w, -h, 0}, uv = {1, 0}, color = {0.0, 1.0, 0.0, 1.0}},
+            Vertex{position = {+w, +h, 0}, uv = {1, 1}, color = {0.0, 0.0, 1.0, 1.0}},
+            Vertex{position = {-w, +h, 0}, uv = {0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
         },
         indices  = {0, 1, 2, 0, 2, 3},
     }
@@ -67,27 +66,31 @@ main :: proc() {
             }
         }
 
+        wiggle := cast(f32)(math.sin(ray.GetTime()) + 1.0) / 2.0
+
         // Render mesh.
-        render_mesh(mesh)
+        transform :=
+            linalg.matrix_ortho3d_f32(0, cast(f32)screen.width, 0, cast(f32)screen.height, -1, 1) *
+            linalg.matrix4_translate_f32({w, h, 0}) *
+            linalg.matrix4_scale_f32({0.66, 0.66, 0.66}) *
+            linalg.matrix4_rotate_f32(wiggle, {0.0, 0.0, 1.0})
+
+        render_mesh(mesh, assets.image1, transform)
 
         // Update texture with image contents.
-        ray.UpdateTexture(screen_texture, raw_data(screen.data))
+        ray.UpdateTexture(screen.texture, raw_data(screen.data))
+
+        info := fmt.ctprintf(
+            "{:0.2f} ms ({} fps), use-simd: {}",
+            1000.0 / cast(f32)ray.GetFPS(),
+            ray.GetFPS(),
+            toggles.use_simd,
+        )
 
         // Flush texture to the screen.
         ray.BeginDrawing()
-        ray.DrawTextureEx(screen_texture, {0, 0}, 0, FACTOR, ray.WHITE)
-        ray.DrawText(
-            fmt.ctprintf(
-                "{:0.2f} ms ({} fps), use-simd: {}",
-                1000.0 / cast(f32)ray.GetFPS(),
-                ray.GetFPS(),
-                toggles.use_simd,
-            ),
-            10,
-            10,
-            20,
-            ray.WHITE,
-        )
+        ray.DrawTextureEx(screen.texture, {0, 0}, 0, FACTOR, ray.WHITE)
+        ray.DrawText(info, 10, 10, 20, ray.WHITE)
         ray.EndDrawing()
 
         // Exit when pressing escape.
@@ -107,8 +110,9 @@ SCREEN_H :: 540
 FACTOR :: 2
 
 screen: struct {
-    using _:  Image,
-    min, max: Vector2,
+    using base_image: Image,
+    texture:          ray.Texture2D,
+    min, max:         Vector2,
 }
 
 assets: struct {
@@ -119,7 +123,7 @@ assets: struct {
 toggles: struct {
     use_simd: bool,
 } = {
-    use_simd = true,
+    use_simd = false,
 }
 
 // -----------------------------------------------------------------------------
@@ -127,7 +131,7 @@ toggles: struct {
 Vector2 :: ray.Vector2
 Vector3 :: ray.Vector3
 Vector4 :: ray.Vector4
-Matrix :: ray.Matrix
+Matrix :: matrix[4, 4]f32
 
 // -----------------------------------------------------------------------------
 
@@ -141,32 +145,45 @@ Image :: struct {
     data:          []Color,
     width, height: int,
     simd:          struct {
-        data: #simd[4]uintptr,
+        begin: #simd[4]uintptr,
+        end:   #simd[4]uintptr,
     },
 }
 
-image_load :: proc(path: cstring) -> (image: Image) {
+image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
 
-    ray_image := ray.LoadImage(path)
-    defer ray.UnloadImage(ray_image)
+    count := w * h
 
-    aligned_memory, err := mem.make_aligned([]Color, ray_image.width * ray_image.height, 16)
+    aligned_memory, err := mem.make_aligned([]Color, count, 16)
     if err != .None {
         fmt.panicf("Unable to allocate aligned image memory: {}", err)
     }
 
-    copy(aligned_memory, (cast([^]Color)ray_image.data)[:len(aligned_memory)])
+    copy(aligned_memory, pixels)
 
-    image = {
+    image := Image {
         data = aligned_memory,
-        width = cast(int)ray_image.width,
-        height = cast(int)ray_image.height,
+        width = w,
+        height = h,
         simd = {     //
-            data = cast(uintptr)raw_data(aligned_memory),
+            begin = cast(uintptr)raw_data(aligned_memory),
+            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(count * size_of(Color)),
         },
     }
 
-    return
+    return image
+}
+
+image_load :: proc(path: cstring) -> Image {
+
+    ray_image := ray.LoadImage(path)
+    defer ray.UnloadImage(ray_image)
+
+    return image_clone_aligned(
+        (cast([^]Color)ray_image.data)[:ray_image.width * ray_image.height],
+        cast(int)ray_image.width,
+        cast(int)ray_image.height,
+    )
 }
 
 image_set_pixel :: #force_inline proc(image: Image, x, y: int, color: Color) #no_bounds_check {
@@ -204,7 +221,10 @@ image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bo
     offsets := (ys * cast(i32)image.width) + xs
 
     // Read the requested image data.
-    addrs := image.simd.data + cast(#simd[4]uintptr)(offsets * size_of(Color))
+    addrs := image.simd.begin + cast(#simd[4]uintptr)(offsets * size_of(Color))
+    // Ensure pointers valid to access.
+    addrs = simd.clamp(addrs, image.simd.begin, image.simd.end)
+
     return simd.gather(cast(#simd[4]rawptr)addrs, simd.u32x4(0), simd.u32x4(1))
 }
 
@@ -224,7 +244,7 @@ Mesh :: struct($TVertex: typeid) {
 // FOR NOW
 vertices: [dynamic]Vertex
 
-render_mesh :: proc(mesh: Mesh(Vertex)) {
+render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
 
     for i := 0; i < len(mesh.indices); i += 3 {
 
@@ -232,11 +252,11 @@ render_mesh :: proc(mesh: Mesh(Vertex)) {
         b := mesh.vertices[mesh.indices[i + 1]]
         c := mesh.vertices[mesh.indices[i + 2]]
 
-        render_triangle(a, b, c)
+        render_triangle(a, b, c, image, transform)
     }
 }
 
-render_triangle :: proc(a, b, c: Vertex) {
+render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     // Overall software rendering algorithm:
     // - Transform vertex stream (vertex shader)
@@ -244,9 +264,9 @@ render_triangle :: proc(a, b, c: Vertex) {
     // - Fill (depth test and fragment shader)
 
     // Transform
-    a_ndc := vertex_shader(a)
-    b_ndc := vertex_shader(b)
-    c_ndc := vertex_shader(c)
+    a_ndc := vertex_shader(a, transform)
+    b_ndc := vertex_shader(b, transform)
+    c_ndc := vertex_shader(c, transform)
 
     // TODO: Perspective interpolation (1/w)
     // TODO: Clip?
@@ -271,9 +291,9 @@ render_triangle :: proc(a, b, c: Vertex) {
 
     // Render the triangle!
     if toggles.use_simd {
-        rasterize_triangle_simd(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, assets.image1)
+        rasterize_triangle_simd(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, image)
     } else {
-        rasterize_triangle(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, assets.image2)
+        rasterize_triangle(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, image)
     }
 
     // }
@@ -285,6 +305,10 @@ render_triangle :: proc(a, b, c: Vertex) {
         pos.y *= cast(f32)screen.height
 
         return {pos.x, pos.y, ndc.z, ndc.w}
+    }
+
+    vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
+        return transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
     }
 }
 
@@ -352,6 +376,10 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
     triangle_min = linalg.clamp(triangle_min, screen.min, screen.max)
     triangle_max = linalg.clamp(triangle_max, screen.min, screen.max)
 
+    // SIMD reads and writes need to be 16 byte aligned.
+    align_min_x := cast(f32)mem.align_backward_int(cast(int)triangle_min.x, 4)
+    align_max_x := cast(f32)mem.align_forward_int(cast(int)triangle_max.x, 4)
+
     ab12 := v1.xy - v2.xy
     ab20 := v2.xy - v0.xy
     ab01 := v0.xy - v1.xy
@@ -360,7 +388,7 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
 
         py := cast(simd.f32x4)y
 
-        for x := triangle_min.x; x < triangle_max.x; x += 4 {
+        for x := align_min_x; x < align_max_x; x += 4 {
 
             px: simd.f32x4 = {x + 0, x + 1, x + 2, x + 3}
 
@@ -413,12 +441,4 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
     //     Ai := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(A * 0xFF), 24)
     //     return simd.bit_or(Ri, simd.bit_or(Gi, simd.bit_or(Bi, Ai)))
     // }
-}
-
-vertex_shader :: proc(vertex: Vertex) -> Vector4 {
-    return {vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
-}
-
-fragment_shader :: proc(vertex: Vertex) -> Vector4 {
-    return vertex.color
 }
