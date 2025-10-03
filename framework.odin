@@ -67,6 +67,7 @@ update_screen_pixels :: proc(info: string) {
 
     // Flush texture to the screen.
     ray.BeginDrawing()
+    ray.ClearBackground(ray.BLACK)
     ray.DrawTextureEx(texture_, {0, 0}, 0, FACTOR, ray.WHITE)
     ray.DrawText(status, 10, 10, 20, ray.WHITE)
     ray.EndDrawing()

@@ -23,7 +23,7 @@ main :: proc() {
     assets.image2 = image_load("kenney2.png")
 
     // ...
-    teapot := parse_wavefront_mesh(#load("assets/honey.obj", string))
+    teapot := parse_wavefront_mesh(#load("assets/teapot.obj", string), true)
 
     // Main loop.
     main_loop: for is_window_open() {
@@ -32,10 +32,11 @@ main :: proc() {
         image_clear(screen, transmute(Color)(u32(0xFF181818)))
         slice.fill(screen_depth, 1.0) // clear depth buffer
 
-        camera_position := Vector3{math.cos_f32(get_time() / 3), 1.5, math.sin_f32(get_time() / 5)} * 0.8
+        time: f32 = get_time()
+        camera_position := Vector3{math.cos_f32(time / 3), 0, math.sin_f32(time / 5)} * 110.8
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
-            linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 100.0) *
+            linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 200.0) *
             linalg.matrix4_look_at_f32(camera_position, {0, 1.0, 0}, {0, 1, 0})
 
         render_mesh(teapot, assets.image1, camera_matrix)
@@ -67,7 +68,7 @@ assets: struct {
 toggles: struct {
     use_simd: bool,
 } = {
-    use_simd = false,
+    use_simd = true,
 }
 
 // -----------------------------------------------------------------------------
@@ -147,7 +148,7 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
         pos.x *= cast(f32)screen.size.x
         pos.y *= cast(f32)screen.size.y
 
-        return {pos.x, pos.y, ndc.z, 1.0 / ndc.w}
+        return {pos.x, pos.y, ndc.z, ndc.w}
     }
 
     vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
@@ -187,7 +188,7 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
             w2 *= wT
 
             ndc := interpolate(v0, v1, v2, w0, w1, w2)
-            depth := ndc.z * ndc.w
+            depth := ndc.z / ndc.w
 
             // ---- DEPTH TEST ----
 
@@ -196,22 +197,24 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
                 continue // fragment hidden
             }
 
-            // ---- FRAGMENT SHADER BEGIN ---
+            // ---- INTERPOLATOR ---
 
             fragment_normal := linalg.normalize(interpolate(a.normal, b.normal, c.normal, w0, w1, w2))
             fragment_uv := interpolate(a.uv, b.uv, c.uv, w0, w1, w2)
 
-            color := image_sample(image, fragment_uv)
+            // ---- FRAGMENT SHADER BEGIN ---
+
+            pixel := image_sample(image, fragment_uv)
 
             brightness := max(0.0, linalg.dot(fragment_normal, Sun_Direction))
-            color = mix_color(0, color, 0.25 + (brightness * 0.75))
+            pixel = mix_color(0, pixel, 0.25 + (brightness * 0.75))
 
             // ---- FRAGMENT SHADER END ---
 
-            color.a = 0xFF // no transparency
+            pixel.a = 0xFF // no transparency
 
             // Write color
-            image_set_pixel(screen, cast(int)x, cast(int)y, color)
+            image_set_pixel(screen, cast(int)x, cast(int)y, pixel)
 
             // Write depth
             depth_ptr[0] = depth
@@ -273,7 +276,7 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
 
             ndc_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
             ndc_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
-            depth := ndc_z * ndc_w
+            depth := ndc_z / ndc_w
 
             // ---- DEPTH TEST ----
 
@@ -284,7 +287,7 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
                 continue // all fragments are hidden
             }
 
-            // ---- FRAGMENT SHADER BEGIN ---
+            // ---- INTERPOLATOR ---
 
             NX := interpolate(a.normal.x, b.normal.x, c.normal.x, w0, w1, w2)
             NY := interpolate(a.normal.y, b.normal.y, c.normal.y, w0, w1, w2)
@@ -293,7 +296,17 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
             U := interpolate(a.uv.x, b.uv.x, c.uv.x, w0, w1, w2)
             V := interpolate(a.uv.y, b.uv.y, c.uv.y, w0, w1, w2)
 
-            pixels := image_sample_simd(image, U, V)
+            // ---- FRAGMENT SHADER BEGIN ---
+
+            R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(image, U, V))
+
+            brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, Sun_Direction)) * 0.75)
+
+            R *= brightness
+            G *= brightness
+            B *= brightness
+
+            pixels := convert_f32_to_u32_simd(R, G, B, A)
 
             // ---- FRAGMENT SHADER END ---
 
@@ -315,18 +328,23 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
         return (a * w0) + (b * w1) + (c * w2)
     }
 
-    // @(enable_target_feature = "sse2")
-    // convert_f32_to_u32_simd :: proc(R, G, B, A: simd.f32x4) -> simd.u32x4 {
-    //     Ri := transmute(simd.u32x4)x86._mm_cvtps_epi32(R * 0xFF)
-    //     Gi := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(G * 0xFF), 8)
-    //     Bi := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(B * 0xFF), 16)
-    //     Ai := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(A * 0xFF), 24)
-    //     return simd.bit_or(Ri, simd.bit_or(Gi, simd.bit_or(Bi, Ai)))
-    // }
+    dot :: proc(ax, ay, az: #simd[4]f32, b: Vector3) -> #simd[4]f32 {
+        return interpolate(ax, ay, az, b.x, b.y, b.z)
+    }
 
-    // @(enable_target_feature = "sse2")
-    // convert_u32_to_f32_simd :: proc(R, G, B, A: simd.f32x4) -> simd.u32x4 {
-    //     // (u32)(r * 0xFF)
-    //     unimplemented()
-    // }
+    convert_f32_to_u32_simd :: proc(R, G, B, A: #simd[4]f32) -> #simd[4]u32 {
+        Ri := cast(#simd[4]u32)(R * 0xFF)
+        Gi := simd.shl(cast(#simd[4]u32)(G * 0xFF), 8)
+        Bi := simd.shl(cast(#simd[4]u32)(B * 0xFF), 16)
+        Ai := simd.shl(cast(#simd[4]u32)(A * 0xFF), 24)
+        return Ri | Gi | Bi | Ai
+    }
+
+    convert_u32_to_f32_simd :: proc(color: #simd[4]u32) -> (R, G, B, A: #simd[4]f32) {
+        R = (cast(#simd[4]f32)(color & 0xFF)) / 0xFF
+        G = (cast(#simd[4]f32)(simd.shr(color, 8) & 0xFF)) / 0xFF
+        B = (cast(#simd[4]f32)(simd.shr(color, 16) & 0xFF)) / 0xFF
+        A = (cast(#simd[4]f32)(simd.shr(color, 24) & 0xFF)) / 0xFF
+        return
+    }
 }
