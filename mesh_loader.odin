@@ -6,7 +6,7 @@ import "core:math/linalg"
 import "core:strconv"
 import "core:strings"
 
-parse_wavefront_mesh :: proc(text: string, clockwise := false) -> Mesh(Vertex) {
+parse_wavefront_mesh :: proc(text: string, clockwise := false, flip_uv := false) -> Mesh(Vertex) {
 
     vertices: [dynamic]Vertex
     indices: [dynamic]int
@@ -65,7 +65,7 @@ parse_wavefront_mesh :: proc(text: string, clockwise := false) -> Mesh(Vertex) {
         case "vt":
             x := strconv.parse_f32(parts[1]) or_else 0
             y := strconv.parse_f32(parts[2]) or_else 0
-            append(&uvs, Vector2{x, y})
+            append(&uvs, Vector2{x, flip_uv ? 1.0 - y : y})
         case "f":
             // f v1 ...
             // f v1/vt1 ...

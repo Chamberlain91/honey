@@ -12,18 +12,15 @@ Sun_Direction := linalg.normalize(Vector3{1, 3, -2})
 
 main :: proc() {
 
-    fmt.printfln("has-hardware-simd: {}", simd.HAS_HARDWARE_SIMD)
-
     // Initialize window.
     initialize_window(SCREEN_W * FACTOR, SCREEN_H * FACTOR, "Honey Software Renderer")
     defer destroy_window()
 
     // ...
-    assets.image1 = image_load("kenney.png")
-    assets.image2 = image_load("kenney2.png")
+    assets.image = image_load("assets/Nexo_Texture.png")
 
     // ...
-    teapot := parse_wavefront_mesh(#load("assets/teapot.obj", string), true)
+    teapot := parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
 
     // Main loop.
     main_loop: for is_window_open() {
@@ -33,13 +30,13 @@ main :: proc() {
         slice.fill(screen_depth, 1.0) // clear depth buffer
 
         time: f32 = get_time()
-        camera_position := Vector3{math.cos_f32(time / 3), 0, math.sin_f32(time / 5)} * 110.8
+        camera_position := Vector3{math.cos_f32(time / 3), 2.5, math.sin_f32(time / 5)} * 4
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
             linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 200.0) *
-            linalg.matrix4_look_at_f32(camera_position, {0, 1.0, 0}, {0, 1, 0})
+            linalg.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
 
-        render_mesh(teapot, assets.image1, camera_matrix)
+        render_mesh(teapot, assets.image, camera_matrix)
 
         status := fmt.tprintf("use-simd: {}", toggles.use_simd)
         update_screen_pixels(status)
@@ -61,8 +58,7 @@ SCREEN_H :: 540
 FACTOR :: 2
 
 assets: struct {
-    image1: Image,
-    image2: Image,
+    image: Image,
 }
 
 toggles: struct {

@@ -1,9 +1,12 @@
 package honey
 
+import "core:bytes"
 import "core:c"
 import "core:fmt"
+import "core:image/png"
 import "core:mem"
 import "core:simd"
+import "core:slice"
 import "core:strings"
 import ray "vendor:raylib"
 
@@ -148,13 +151,12 @@ Image :: struct {
 
 image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
 
-    count := w * h
-
-    aligned_memory, err := mem.make_aligned([]Color, count, 16)
+    aligned_memory, err := mem.make_aligned([]Color, len(pixels), 16)
     if err != .None {
         fmt.panicf("Unable to allocate aligned image memory: {}", err)
     }
 
+    assert(len(pixels) == len(aligned_memory))
     copy(aligned_memory, pixels)
 
     image := Image {
@@ -162,23 +164,24 @@ image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
         size = {w, h},
         simd = {     //
             begin = cast(uintptr)raw_data(aligned_memory),
-            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(count * size_of(Color)),
+            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(len(pixels) * size_of(Color)),
         },
     }
 
     return image
 }
 
-image_load :: proc(path: cstring) -> Image {
+image_load :: proc(path: string) -> Image {
 
-    ray_image := ray.LoadImage(path)
-    defer ray.UnloadImage(ray_image)
+    image, _ := png.load_from_file(path)
+    defer png.destroy(image)
 
-    return image_clone_aligned(
-        (cast([^]Color)ray_image.data)[:ray_image.width * ray_image.height],
-        cast(int)ray_image.width,
-        cast(int)ray_image.height,
-    )
+    data := cast(^Color)raw_data(bytes.buffer_to_bytes(&image.pixels))
+    pixels := slice.from_ptr(data, image.width * image.height)
+
+    fmt.printfln("Loaded image: {}x{} with {} pixels", image.width, image.height, len(pixels))
+
+    return image_clone_aligned(pixels, image.width, image.height)
 }
 
 image_clear :: proc(image: Image, color: Color) {
