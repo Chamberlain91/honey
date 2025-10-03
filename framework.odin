@@ -8,6 +8,7 @@ import "core:strings"
 import ray "vendor:raylib"
 
 screen: Image
+screen_depth: []f32
 
 @(private = "file")
 texture_: ray.Texture2D
@@ -28,6 +29,8 @@ initialize_window :: proc(width, height: int, title: string) {
         defer ray.UnloadImage(img)
 
         screen = image_clone_aligned((cast([^]Color)img.data)[0:SCREEN_W * SCREEN_H], SCREEN_W, SCREEN_H)
+        screen_depth = mem.make_aligned([]f32, SCREEN_W * SCREEN_H, 16) or_else panic("Allocation failed.")
+
         texture_ = ray.LoadTextureFromImage(img)
     }
 }
@@ -54,7 +57,13 @@ update_screen_pixels :: proc(info: string) {
     // Update texture with image contents.
     ray.UpdateTexture(texture_, raw_data(screen.data))
 
-    status := fmt.ctprintf("Frame time: {:.2f} ms ({} fps)\n{}", 1000.0 / cast(f32)ray.GetFPS(), ray.GetFPS(), info)
+    status := fmt.ctprintf(
+        "{} x {} | Frame time: {:.2f} ms ({} fps)\n{}",
+        expand_values(screen.size),
+        1000.0 / cast(f32)ray.GetFPS(),
+        ray.GetFPS(),
+        info,
+    )
 
     // Flush texture to the screen.
     ray.BeginDrawing()
@@ -95,7 +104,6 @@ is_key_released :: proc(key: Key) -> bool {
 
 // Determine if the key is held.
 is_key_down :: proc(key: Key) -> bool {
-
     return ray.IsKeyDown(auto_cast key)
 }
 

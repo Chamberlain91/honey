@@ -6,6 +6,9 @@ import "base:intrinsics"
 import "core:math/linalg"
 import "core:mem"
 import "core:simd"
+import "core:slice"
+
+Sun_Direction := linalg.normalize(Vector3{1, 3, -2})
 
 main :: proc() {
 
@@ -19,44 +22,21 @@ main :: proc() {
     assets.image1 = image_load("kenney.png")
     assets.image2 = image_load("kenney2.png")
 
-    w: f32 = 1.0 // cast(f32)assets.image1.size.x / 2.0
-    h: f32 = 1.0 //cast(f32)assets.image1.size.y / 2.0
-
-    teapot := parse_wavefront_mesh(#load("assets/teapot.obj", string))
-
-    mesh := Mesh(Vertex) {
-        vertices = {
-            Vertex{position = {-w, -h, 0}, uv = {0, 0}, color = {1.0, 0.0, 0.0, 1.0}},
-            Vertex{position = {+w, -h, 0}, uv = {1, 0}, color = {0.0, 1.0, 0.0, 1.0}},
-            Vertex{position = {+w, +h, 0}, uv = {1, 1}, color = {0.0, 0.0, 1.0, 1.0}},
-            Vertex{position = {-w, +h, 0}, uv = {0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
-        },
-        indices  = {0, 1, 2, 0, 2, 3},
-    }
+    // ...
+    teapot := parse_wavefront_mesh(#load("assets/honey.obj", string))
 
     // Main loop.
     main_loop: for is_window_open() {
 
         // Populate image data for this frame.
         image_clear(screen, transmute(Color)(u32(0xFF181818)))
+        slice.fill(screen_depth, 1.0) // clear depth buffer
 
-        wiggle := (math.sin(get_time()) + 1.0) / 2.0
-
+        camera_position := Vector3{math.cos_f32(get_time() / 3), 1.5, math.sin_f32(get_time() / 5)} * 0.8
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
-        camera_fov: f32 = math.PI / 2
-
-        // Render mesh.
-        // camera_matrix := linalg.matrix_ortho3d_f32(0, cast(f32)screen.size.x, 0, cast(f32)screen.size.y, -1, 1)
-        camera_position := Vector3{math.cos_f32(get_time()), 1, math.sin_f32(get_time())} * 80
         camera_matrix :=
-            linalg.matrix4_perspective_f32(camera_fov, camera_aspect, 0.1, 1000.0) *
-            linalg.matrix4_look_at_f32(camera_position, 0, {0, 1, 0})
-
-        // Render mesh.
-        transform :=
-            linalg.matrix4_translate_f32({0, 0, 0}) *
-            linalg.matrix4_scale_f32({0.66, 0.66, 0.66}) *
-            linalg.matrix4_rotate_f32(wiggle, {0.0, 0.0, 1.0})
+            linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 100.0) *
+            linalg.matrix4_look_at_f32(camera_position, {0, 1.0, 0}, {0, 1, 0})
 
         render_mesh(teapot, assets.image1, camera_matrix)
 
@@ -87,7 +67,7 @@ assets: struct {
 toggles: struct {
     use_simd: bool,
 } = {
-    use_simd = true,
+    use_simd = false,
 }
 
 // -----------------------------------------------------------------------------
@@ -112,8 +92,8 @@ render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
     for i := 0; i < len(mesh.indices); i += 3 {
 
         a := mesh.vertices[mesh.indices[i + 0]]
-        b := mesh.vertices[mesh.indices[i + 1]]
-        c := mesh.vertices[mesh.indices[i + 2]]
+        b := mesh.vertices[mesh.indices[i + 2]]
+        c := mesh.vertices[mesh.indices[i + 1]]
 
         render_triangle(a, b, c, image, transform)
     }
@@ -141,7 +121,7 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     // parts := clip_triangle(a_ndc, b_ndc, c_ndc)
     // for a, b, c in parts {
 
-    // Map NDC -> Viewport
+    // Map NDC -> Viewport in XY
     a_ndc = map_to_viewport(a_ndc)
     b_ndc = map_to_viewport(b_ndc)
     c_ndc = map_to_viewport(c_ndc)
@@ -154,20 +134,20 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     // Render the triangle!
     if toggles.use_simd {
-        rasterize_triangle_simd(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, image)
+        rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, image)
     } else {
-        rasterize_triangle(a_ndc.xy, b_ndc.xy, c_ndc.xy, a, b, c, image)
+        rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
     }
 
     // }
 
     map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
 
-        pos := ((ndc.xy / -ndc.w) + 1.0) / 2.0
+        pos := ((Vector2{ndc.x, -ndc.y} / ndc.w) + 1.0) / 2.0
         pos.x *= cast(f32)screen.size.x
         pos.y *= cast(f32)screen.size.y
 
-        return {pos.x, pos.y, ndc.z, ndc.w}
+        return {pos.x, pos.y, ndc.z, 1.0 / ndc.w}
     }
 
     vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
@@ -175,26 +155,20 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     }
 }
 
-rasterize_triangle :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
 
     screen_size := linalg.array_cast(screen.size, f32)
 
     // Find triangle bounds clamped to screen.
-    triangle_min := linalg.clamp(linalg.min(v0, v1, v2), 0, screen_size)
-    triangle_max := linalg.clamp(linalg.max(v0, v1, v2), 0, screen_size)
+    triangle_min := linalg.clamp(linalg.min(v0.xy, v1.xy, v2.xy), 0, screen_size)
+    triangle_max := linalg.clamp(linalg.max(v0.xy, v1.xy, v2.xy), 0, screen_size)
 
     ab12 := v1.xy - v2.xy
     ab20 := v2.xy - v0.xy
     ab01 := v0.xy - v1.xy
 
-    // for y in triangle_min.y ..< triangle_max.y {
-    //     for x in triangle_min.x ..< triangle_max.x {
-    //         image_set_pixel(screen, cast(int)x, cast(int)y, transmute(Color)u32(0xFF996633))
-    //     }
-    // }
-
-    for y in triangle_min.y ..< triangle_max.y {
-        for x in triangle_min.x ..< triangle_max.x {
+    for y in math.floor(triangle_min.y) ..< math.ceil(triangle_max.y) {
+        for x in math.floor(triangle_min.x) ..< math.ceil(triangle_max.x) {
 
             p := Vector2{x, y}
 
@@ -206,20 +180,41 @@ rasterize_triangle :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #
                 continue
             }
 
-            wT := w0 + w1 + w2
+            wT := 1.0 / (w0 + w1 + w2)
 
-            w0 /= wT
-            w1 /= wT
-            w2 /= wT
+            w0 *= wT
+            w1 *= wT
+            w2 *= wT
+
+            ndc := interpolate(v0, v1, v2, w0, w1, w2)
+            depth := ndc.z * ndc.w
+
+            // ---- DEPTH TEST ----
+
+            depth_ptr := raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
+            if depth > depth_ptr[0] {
+                continue // fragment hidden
+            }
 
             // ---- FRAGMENT SHADER BEGIN ---
 
+            fragment_normal := linalg.normalize(interpolate(a.normal, b.normal, c.normal, w0, w1, w2))
             fragment_uv := interpolate(a.uv, b.uv, c.uv, w0, w1, w2)
+
             color := image_sample(image, fragment_uv)
+
+            brightness := max(0.0, linalg.dot(fragment_normal, Sun_Direction))
+            color = mix_color(0, color, 0.25 + (brightness * 0.75))
 
             // ---- FRAGMENT SHADER END ---
 
+            color.a = 0xFF // no transparency
+
+            // Write color
             image_set_pixel(screen, cast(int)x, cast(int)y, color)
+
+            // Write depth
+            depth_ptr[0] = depth
         }
     }
 
@@ -233,26 +228,23 @@ rasterize_triangle :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #
 }
 
 @(private = "file")
-rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
 
-    // Find triangle bounds.
-    triangle_min := linalg.min(v0, v1, v2)
-    triangle_max := linalg.max(v0, v1, v2)
-
-    // Clamp triangle bounds to screen bounds.
     screen_size := linalg.array_cast(screen.size, f32)
-    triangle_min = linalg.clamp(triangle_min, 0, screen_size)
-    triangle_max = linalg.clamp(triangle_max, 0, screen_size)
+
+    // Find triangle bounds clamped to screen.
+    triangle_min := linalg.clamp(linalg.min(v0.xy, v1.xy, v2.xy), 0, screen_size)
+    triangle_max := linalg.clamp(linalg.max(v0.xy, v1.xy, v2.xy), 0, screen_size)
 
     // SIMD reads and writes need to be 16 byte aligned.
-    align_min_x := cast(f32)mem.align_backward_int(cast(int)triangle_min.x, 4)
-    align_max_x := cast(f32)mem.align_forward_int(cast(int)triangle_max.x, 4)
+    align_min_x := cast(f32)mem.align_backward_int(cast(int)math.floor(triangle_min.x), 4)
+    align_max_x := cast(f32)mem.align_forward_int(cast(int)math.ceil(triangle_max.x), 4)
 
     ab12 := v1.xy - v2.xy
     ab20 := v2.xy - v0.xy
     ab01 := v0.xy - v1.xy
 
-    for y in triangle_min.y ..< triangle_max.y {
+    for y in math.floor(triangle_min.y) ..< math.ceil(triangle_max.y) {
 
         py := cast((#simd[4]f32))y
 
@@ -269,27 +261,49 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
             write_mask = write_mask & simd.lanes_ge(w1, (#simd[4]f32)(0))
             write_mask = write_mask & simd.lanes_ge(w2, (#simd[4]f32)(0))
 
-            if simd.reduce_or(write_mask) != 0 {
-
-                wT := w0 + w1 + w2
-
-                w0 /= wT
-                w1 /= wT
-                w2 /= wT
-
-                // ---- FRAGMENT SHADER BEGIN ---
-
-                U := interpolate(a.uv.x, b.uv.x, c.uv.x, w0, w1, w2)
-                V := interpolate(a.uv.y, b.uv.y, c.uv.y, w0, w1, w2)
-
-                pixels := image_sample_simd(image, U, V)
-
-                // ---- FRAGMENT SHADER END ---
-
-                // Write rasterized pixel into image.
-                pixel_ptr := cast(^#simd[4]u32)image_get_pixel_ptr(screen, cast(int)x, cast(int)y)
-                pixel_ptr^ = (pixels & write_mask) | (pixel_ptr^ &~ write_mask)
+            if simd.reduce_or(write_mask) == 0 {
+                continue // all fragments are outside the triangle
             }
+
+            wT := 1.0 / (w0 + w1 + w2)
+
+            w0 *= wT
+            w1 *= wT
+            w2 *= wT
+
+            ndc_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
+            ndc_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
+            depth := ndc_z * ndc_w
+
+            // ---- DEPTH TEST ----
+
+            depth_ptr := cast(^#simd[4]f32)raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
+            write_mask = write_mask & simd.lanes_lt(depth, depth_ptr^)
+
+            if simd.reduce_or(write_mask) == 0 {
+                continue // all fragments are hidden
+            }
+
+            // ---- FRAGMENT SHADER BEGIN ---
+
+            NX := interpolate(a.normal.x, b.normal.x, c.normal.x, w0, w1, w2)
+            NY := interpolate(a.normal.y, b.normal.y, c.normal.y, w0, w1, w2)
+            NZ := interpolate(a.normal.z, b.normal.z, c.normal.z, w0, w1, w2)
+
+            U := interpolate(a.uv.x, b.uv.x, c.uv.x, w0, w1, w2)
+            V := interpolate(a.uv.y, b.uv.y, c.uv.y, w0, w1, w2)
+
+            pixels := image_sample_simd(image, U, V)
+
+            // ---- FRAGMENT SHADER END ---
+
+            // Write color.
+            pixel_ptr := cast(^#simd[4]u32)image_get_pixel_ptr(screen, cast(int)x, cast(int)y)
+            pixel_ptr^ = (pixels & write_mask) | (pixel_ptr^ &~ write_mask)
+
+            // Write depth.
+            depth_ptr^ = transmute(#simd[4]f32)((transmute(#simd[4]u32)depth & write_mask) |
+                (transmute(#simd[4]u32)(depth_ptr^) &~ write_mask))
         }
     }
 
@@ -308,5 +322,11 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
     //     Bi := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(B * 0xFF), 16)
     //     Ai := simd.shl(transmute(simd.u32x4)x86._mm_cvtps_epi32(A * 0xFF), 24)
     //     return simd.bit_or(Ri, simd.bit_or(Gi, simd.bit_or(Bi, Ai)))
+    // }
+
+    // @(enable_target_feature = "sse2")
+    // convert_u32_to_f32_simd :: proc(R, G, B, A: simd.f32x4) -> simd.u32x4 {
+    //     // (u32)(r * 0xFF)
+    //     unimplemented()
     // }
 }
