@@ -19,8 +19,10 @@ main :: proc() {
     assets.image1 = image_load("kenney.png")
     assets.image2 = image_load("kenney2.png")
 
-    w := cast(f32)assets.image1.size.x / 2.0
-    h := cast(f32)assets.image1.size.y / 2.0
+    w: f32 = 1.0 // cast(f32)assets.image1.size.x / 2.0
+    h: f32 = 1.0 //cast(f32)assets.image1.size.y / 2.0
+
+    teapot := parse_wavefront_mesh(#load("assets/teapot.obj", string))
 
     mesh := Mesh(Vertex) {
         vertices = {
@@ -40,14 +42,23 @@ main :: proc() {
 
         wiggle := (math.sin(get_time()) + 1.0) / 2.0
 
+        camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
+        camera_fov: f32 = math.PI / 2
+
+        // Render mesh.
+        // camera_matrix := linalg.matrix_ortho3d_f32(0, cast(f32)screen.size.x, 0, cast(f32)screen.size.y, -1, 1)
+        camera_position := Vector3{math.cos_f32(get_time()), 1, math.sin_f32(get_time())} * 80
+        camera_matrix :=
+            linalg.matrix4_perspective_f32(camera_fov, camera_aspect, 0.1, 1000.0) *
+            linalg.matrix4_look_at_f32(camera_position, 0, {0, 1, 0})
+
         // Render mesh.
         transform :=
-            linalg.matrix_ortho3d_f32(0, cast(f32)screen.size.x, 0, cast(f32)screen.size.y, -1, 1) *
-            linalg.matrix4_translate_f32({w, h, 0}) *
+            linalg.matrix4_translate_f32({0, 0, 0}) *
             linalg.matrix4_scale_f32({0.66, 0.66, 0.66}) *
             linalg.matrix4_rotate_f32(wiggle, {0.0, 0.0, 1.0})
 
-        render_mesh(mesh, assets.image1, transform)
+        render_mesh(teapot, assets.image1, camera_matrix)
 
         status := fmt.tprintf("use-simd: {}", toggles.use_simd)
         update_screen_pixels(status)
@@ -83,6 +94,7 @@ toggles: struct {
 
 Vertex :: struct {
     position: Vector3,
+    normal:   Vector3,
     uv:       Vector2,
     color:    Vector4,
 }
@@ -151,7 +163,7 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
 
-        pos := (ndc.xy + 1.0) / 2.0
+        pos := ((ndc.xy / -ndc.w) + 1.0) / 2.0
         pos.x *= cast(f32)screen.size.x
         pos.y *= cast(f32)screen.size.y
 
@@ -167,17 +179,19 @@ rasterize_triangle :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Image) #
 
     screen_size := linalg.array_cast(screen.size, f32)
 
-    // Find triangle bounds.
-    triangle_min := linalg.min(v0, v1, v2)
-    triangle_max := linalg.max(v0, v1, v2)
-
-    // Clamp triangle bounds to screen bounds.
-    triangle_min = linalg.clamp(triangle_min, 0, screen_size)
-    triangle_max = linalg.clamp(triangle_max, 0, screen_size)
+    // Find triangle bounds clamped to screen.
+    triangle_min := linalg.clamp(linalg.min(v0, v1, v2), 0, screen_size)
+    triangle_max := linalg.clamp(linalg.max(v0, v1, v2), 0, screen_size)
 
     ab12 := v1.xy - v2.xy
     ab20 := v2.xy - v0.xy
     ab01 := v0.xy - v1.xy
+
+    // for y in triangle_min.y ..< triangle_max.y {
+    //     for x in triangle_min.x ..< triangle_max.x {
+    //         image_set_pixel(screen, cast(int)x, cast(int)y, transmute(Color)u32(0xFF996633))
+    //     }
+    // }
 
     for y in triangle_min.y ..< triangle_max.y {
         for x in triangle_min.x ..< triangle_max.x {
@@ -240,20 +254,20 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
 
     for y in triangle_min.y ..< triangle_max.y {
 
-        py := cast(simd.f32x4)y
+        py := cast((#simd[4]f32))y
 
         for x := align_min_x; x < align_max_x; x += 4 {
 
-            px: simd.f32x4 = {x + 0, x + 1, x + 2, x + 3}
+            px: (#simd[4]f32) = {x + 0, x + 1, x + 2, x + 3}
 
             w0 := edge(v1.xy, ab12, px, py)
             w1 := edge(v2.xy, ab20, px, py)
             w2 := edge(v0.xy, ab01, px, py)
 
-            write_mask := transmute(simd.u32x4)(~u128(0)) // w0 >= 0 && w1 >= 0 && w2 >= 0
-            write_mask = write_mask & simd.lanes_ge(w0, simd.f32x4(0))
-            write_mask = write_mask & simd.lanes_ge(w1, simd.f32x4(0))
-            write_mask = write_mask & simd.lanes_ge(w2, simd.f32x4(0))
+            write_mask := cast(#simd[4]u32)(0) // w0 >= 0 && w1 >= 0 && w2 >= 0
+            write_mask = ~write_mask & simd.lanes_ge(w0, (#simd[4]f32)(0))
+            write_mask = write_mask & simd.lanes_ge(w1, (#simd[4]f32)(0))
+            write_mask = write_mask & simd.lanes_ge(w2, (#simd[4]f32)(0))
 
             if simd.reduce_or(write_mask) != 0 {
 
@@ -273,17 +287,17 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector2, a, b, c: Vertex, image: Ima
                 // ---- FRAGMENT SHADER END ---
 
                 // Write rasterized pixel into image.
-                pixel_ptr := cast(^simd.u32x4)image_get_pixel_ptr(screen, cast(int)x, cast(int)y)
+                pixel_ptr := cast(^#simd[4]u32)image_get_pixel_ptr(screen, cast(int)x, cast(int)y)
                 pixel_ptr^ = (pixels & write_mask) | (pixel_ptr^ &~ write_mask)
             }
         }
     }
 
-    edge :: #force_inline proc(a, ab: Vector2, cx, cy: simd.f32x4) -> simd.f32x4 {
+    edge :: #force_inline proc(a, ab: Vector2, cx, cy: #simd[4]f32) -> #simd[4]f32 {
         return ((a.y - cy) * ab.x) - ((a.x - cx) * ab.y)
     }
 
-    interpolate :: proc(a, b, c, w0, w1, w2: simd.f32x4) -> simd.f32x4 {
+    interpolate :: proc(a, b, c, w0, w1, w2: #simd[4]f32) -> #simd[4]f32 {
         return (a * w0) + (b * w1) + (c * w2)
     }
 

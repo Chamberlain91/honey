@@ -198,7 +198,9 @@ image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
     x := cast(int)(uv.x * cast(f32)(image.size.x - 1))
     y := cast(int)(uv.y * cast(f32)(image.size.y - 1))
 
-    return image_get_pixel(image, x, y)
+    // Ensure pointers valid to access.
+    offset := clamp((y * image.size.x) + x, 0, len(image.data))
+    return raw_data(image.data)[offset:][0]
 }
 
 // Nearest sample an image using SIMD operations.
@@ -219,5 +221,5 @@ image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bo
     // Ensure pointers valid to access.
     addrs = simd.clamp(addrs, image.simd.begin, image.simd.end)
 
-    return simd.gather(cast(#simd[4]rawptr)addrs, simd.u32x4(0), simd.u32x4(1))
+    return simd.gather(cast(#simd[4]rawptr)addrs, (#simd[4]u32)(0), (#simd[4]u32)(1))
 }
