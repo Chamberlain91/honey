@@ -94,9 +94,9 @@ toggles: struct {
     pause:     bool,
 } = {
     use_simd  = false,
-    use_split = true,
+    use_split = false,
     backface  = true,
-    pause     = false,
+    pause     = true,
 }
 
 // -----------------------------------------------------------------------------
@@ -191,14 +191,9 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
         return transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
     }
-
-    signed_area :: #force_inline proc(a, b, c: Vector2) -> f32 {
-        // Currently returns 2x the area
-        // return ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5
-        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-    }
 }
 
+@(private = "file")
 rasterize_triangle_split :: proc(v0, v1, v2: Vector2) #no_bounds_check {
 
     // Reference:
@@ -247,15 +242,11 @@ rasterize_triangle_split :: proc(v0, v1, v2: Vector2) #no_bounds_check {
     assert(v0.y <= v2.y)
     assert(v1.y <= v2.y)
 
-    y0 := v0.y
-    y1 := v1.y
-    y2 := v2.y
-
-    if y1 == y2 {
+    if v1.y == v2.y {
 
         fill_flat_bottom_triangle(v0, v1, v2)
 
-    } else if y0 == y1 {
+    } else if v0.y == v1.y {
 
         fill_flat_top_triangle(v0, v1, v2)
 
@@ -327,32 +318,50 @@ rasterize_triangle_split :: proc(v0, v1, v2: Vector2) #no_bounds_check {
     }
 }
 
+@(private = "file")
 rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
 
     screen_size := linalg.array_cast(screen.size, f32)
 
+    triangle_min := linalg.floor(linalg.min(v0.xy, v1.xy, v2.xy))
+    triangle_max := linalg.ceil(linalg.max(v0.xy, v1.xy, v2.xy))
+
     // Find triangle bounds clamped to screen.
-    triangle_min := linalg.clamp(linalg.min(v0.xy, v1.xy, v2.xy), 0, screen_size)
-    triangle_max := linalg.clamp(linalg.max(v0.xy, v1.xy, v2.xy), 0, screen_size)
+    range_min := linalg.clamp(triangle_min, 0, screen_size)
+    range_max := linalg.clamp(triangle_max, 0, screen_size)
 
-    ab12 := v1.xy - v2.xy
-    ab20 := v2.xy - v0.xy
-    ab01 := v0.xy - v1.xy
+    v01 := v0 - v1
+    v12 := v1 - v2
+    v20 := v2 - v0
 
-    for y in math.floor(triangle_min.y) ..< math.ceil(triangle_max.y) {
-        for x in math.floor(triangle_min.x) ..< math.ceil(triangle_max.x) {
+    w0_row := signed_area(v1.xy, v2.xy, triangle_min)
+    w1_row := signed_area(v2.xy, v0.xy, triangle_min)
+    w2_row := signed_area(v0.xy, v1.xy, triangle_min)
 
-            p := Vector2{x, y}
+    wT := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
 
-            w0 := edge(v1.xy, ab12, p)
-            w1 := edge(v2.xy, ab20, p)
-            w2 := edge(v0.xy, ab01, p)
+    for y in range_min.y ..< range_max.y {
 
+        w0_inc := w0_row
+        w1_inc := w1_row
+        w2_inc := w2_row
+
+        for x in range_min.x ..< range_max.x {
+
+            w0 := w0_inc
+            w1 := w1_inc
+            w2 := w2_inc
+
+            w0_inc += v12.y
+            w1_inc += v20.y
+            w2_inc += v01.y
+
+            // TODO: bitwise or?
+            // - https://github.com/kristoffer-dyrkorn/triangle-rasterizer/blob/main/9/triangle.js
+            // - https://fgiesen.wordpress.com/2013/02/10/optimizing-the-basic-rasterizer/
             if w0 < 0 || w1 < 0 || w2 < 0 {
                 continue
             }
-
-            wT := 1.0 / (w0 + w1 + w2)
 
             w0 *= wT
             w1 *= wT
@@ -364,6 +373,7 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
             // ---- DEPTH TEST ----
 
             depth_ptr := raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
+
             if depth > depth_ptr[0] {
                 continue // fragment hidden
             }
@@ -390,10 +400,10 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
             // Write depth
             depth_ptr[0] = depth
         }
-    }
 
-    edge :: #force_inline proc(a, ab, c: Vector2) -> f32 {
-        return ((a.y - c.y) * ab.x) - ((a.x - c.x) * ab.y)
+        w0_row -= v12.x
+        w1_row -= v20.x
+        w2_row -= v01.x
     }
 
     interpolate :: proc(a, b, c: $T, w0, w1, w2: f32) -> T {
@@ -520,6 +530,12 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
     }
 }
 
+@(private = "file")
+signed_area :: #force_inline proc(a, b, c: [2]$V) -> V {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+@(private = "file")
 Triangle :: struct {
     positions: [3]Vector4,
     vertices:  [3]Vertex,
