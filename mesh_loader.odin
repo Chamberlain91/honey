@@ -6,7 +6,7 @@ import "core:math/linalg"
 import "core:strconv"
 import "core:strings"
 
-parse_wavefront_mesh :: proc(text: string, clockwise := false, flip_uv := false) -> Mesh(Vertex) {
+parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv := false) -> Mesh(Vertex) {
 
     vertices: [dynamic]Vertex
     indices: [dynamic]int
@@ -104,8 +104,8 @@ parse_wavefront_mesh :: proc(text: string, clockwise := false, flip_uv := false)
             for i in 1 ..< sa.len(faces) - 1 {
 
                 f0 := sa.get(faces, 0)
-                f1 := sa.get(faces, clockwise ? i + 1 : i)
-                f2 := sa.get(faces, clockwise ? i : i + 1)
+                f1 := sa.get(faces, counter_clockwise ? i + 1 : i)
+                f2 := sa.get(faces, counter_clockwise ? i : i + 1)
 
                 p0 := positions[f0.position_index]
                 p1 := positions[f1.position_index]

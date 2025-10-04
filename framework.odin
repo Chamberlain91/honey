@@ -68,10 +68,18 @@ update_screen_pixels :: proc(info: string) {
         info,
     )
 
-    // Flush texture to the screen.
+    // Flush texture to the screen
+    // Draw the texture flipped to that 0,0 image coordinates is bottom-left.
     ray.BeginDrawing()
     ray.ClearBackground(ray.BLACK)
-    ray.DrawTextureEx(texture_, {0, 0}, 0, FACTOR, ray.WHITE)
+    ray.DrawTexturePro(
+        texture_,
+        {0, 0, cast(f32)texture_.width, cast(f32)-texture_.height},
+        {0, 0, cast(f32)texture_.width * FACTOR, cast(f32)texture_.height * FACTOR},
+        {0, 0},
+        0,
+        ray.WHITE,
+    )
     ray.DrawText(status, 10, 10, 20, ray.WHITE)
     ray.EndDrawing()
 }
@@ -81,6 +89,10 @@ update_screen_pixels :: proc(info: string) {
 Vector2 :: [2]f32
 Vector3 :: [3]f32
 Vector4 :: [4]f32
+
+Vector2i :: [2]i32
+Vector3i :: [3]i32
+Vector4i :: [4]i32
 
 Matrix :: matrix[4, 4]f32
 

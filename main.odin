@@ -10,6 +10,9 @@ import "core:slice"
 
 Sun_Direction := linalg.normalize(Vector3{1, 3, -2})
 
+latest_time: f32
+time: f32
+
 main :: proc() {
 
     // Initialize window.
@@ -20,7 +23,7 @@ main :: proc() {
     assets.image = image_load("assets/Nexo_Texture.png")
 
     // ...
-    teapot := parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
+    mesh := parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
 
     // Main loop.
     main_loop: for is_window_open() {
@@ -29,16 +32,24 @@ main :: proc() {
         image_clear(screen, transmute(Color)(u32(0xFF181818)))
         slice.fill(screen_depth, 1.0) // clear depth buffer
 
-        time: f32 = get_time()
+        time += toggles.pause ? 0 : get_time() - latest_time
+        latest_time = get_time()
+
         camera_position := Vector3{math.cos_f32(time / 3), 2.5, math.sin_f32(time / 5)} * 4
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
             linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 200.0) *
             linalg.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
 
-        render_mesh(teapot, assets.image, camera_matrix)
+        render_mesh(mesh, assets.image, camera_matrix)
 
-        status := fmt.tprintf("use-simd: {}", toggles.use_simd)
+        status := fmt.tprintf(
+            "pause: {}, backface: {}, use-simd: {}, use-split: {}",
+            toggles.pause,
+            toggles.backface,
+            toggles.use_simd,
+            toggles.use_split,
+        )
         update_screen_pixels(status)
 
         // Exit when pressing escape.
@@ -46,9 +57,24 @@ main :: proc() {
             break main_loop
         }
 
+        // Pause
+        if is_key_pressed(.Q) {
+            toggles.pause = !toggles.pause
+        }
+
+        // Backface culling
+        if is_key_pressed(.E) {
+            toggles.backface = !toggles.backface
+        }
+
         // Toggle SIMD code paths.
         if is_key_pressed(.Z) {
             toggles.use_simd = !toggles.use_simd
+        }
+
+        // Toggle scanline triangle paths.
+        if is_key_pressed(.X) {
+            toggles.use_split = !toggles.use_split
         }
     }
 }
@@ -62,9 +88,15 @@ assets: struct {
 }
 
 toggles: struct {
-    use_simd: bool,
+    use_simd:  bool,
+    use_split: bool,
+    backface:  bool,
+    pause:     bool,
 } = {
-    use_simd = true,
+    use_simd  = false,
+    use_split = true,
+    backface  = true,
+    pause     = false,
 }
 
 // -----------------------------------------------------------------------------
@@ -98,18 +130,25 @@ render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
 
 render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
-    // Overall software rendering algorithm:
-    // - Transform vertex stream (vertex shader)
-    // - Clip (primitive assembly)
-    // - Fill (depth test and fragment shader)
+    // Reference:
+    // -https://jtsorlinis.github.io/rendering-tutorial/
 
     // Transform
     a_ndc := vertex_shader(a, transform)
     b_ndc := vertex_shader(b, transform)
     c_ndc := vertex_shader(c, transform)
 
-    // TODO: Perspective interpolation (1/w)
-    // TODO: Clip?
+    // Homogenize (perspective divide)
+    a_ndc.xy = a_ndc.xy / a_ndc.w
+    b_ndc.xy = b_ndc.xy / b_ndc.w
+    c_ndc.xy = c_ndc.xy / c_ndc.w
+
+    // Backface culling (counter-clockwise)
+    if toggles.backface && signed_area(a_ndc.xy, b_ndc.xy, c_ndc.xy) < 0 {
+        return
+    }
+
+    // TODO: Frustum plane clipping (near plane clipping at minimum)
 
     // 0 triangles (3 verts behind)
     // 1 triangles (3 verts in front OR 2 verts behind)
@@ -123,24 +162,26 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     b_ndc = map_to_viewport(b_ndc)
     c_ndc = map_to_viewport(c_ndc)
 
-    // TODO: Barycentric weights?
-
-    // TODO: Fill triangle.
-    // - Barycentric bbox?
-    // - Scanline?
-
     // Render the triangle!
     if toggles.use_simd {
-        rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, image)
+        if toggles.use_split {
+            // TODO: rasterize_triangle_split_simd
+        } else {
+            rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, image)
+        }
     } else {
-        rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
+        if toggles.use_split {
+            rasterize_triangle_split(a_ndc.xy, b_ndc.xy, c_ndc.xy)
+        } else {
+            rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
+        }
     }
 
     // }
 
     map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
 
-        pos := ((Vector2{ndc.x, -ndc.y} / ndc.w) + 1.0) / 2.0
+        pos := (Vector2{ndc.x, ndc.y} + 1.0) / 2.0
         pos.x *= cast(f32)screen.size.x
         pos.y *= cast(f32)screen.size.y
 
@@ -149,6 +190,140 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
         return transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
+    }
+
+    signed_area :: #force_inline proc(a, b, c: Vector2) -> f32 {
+        // Currently returns 2x the area
+        // return ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5
+        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    }
+}
+
+rasterize_triangle_split :: proc(v0, v1, v2: Vector2) #no_bounds_check {
+
+    // Reference:
+    // - https://www.sunshine2k.de/coding/java/TriangleRasterization/TriangleRasterization.html
+
+    // BOTTOM FLAT ONLY
+    //
+    //        # - 0
+    //       # #
+    //      #   #
+    // 1 - ####### - 2
+    //
+    // TOP FLAT ONLY
+    //
+    // 0 - ####### - 1
+    //      ##    #
+    //        ##   #
+    //          ##  #
+    //            ## #
+    //              ###
+    //                ## - 2
+    //
+    // BOTH COMPUTE SPLIT
+    //
+    //        # - 0
+    //       # #
+    //      #   #
+    // 1 - #-----# - 3
+    //      ##    #
+    //        ##   #
+    //          ##  #
+    //            ## #
+    //              ###
+    //                ## - 2
+
+    v0 := linalg.array_cast(v0, int)
+    v1 := linalg.array_cast(v1, int)
+    v2 := linalg.array_cast(v2, int)
+
+    // Sort small to high
+    if v0.y > v1.y do swap(&v0, &v1)
+    if v1.y > v2.y do swap(&v1, &v2)
+    if v0.y > v1.y do swap(&v0, &v1)
+
+    assert(v0.y <= v1.y)
+    assert(v0.y <= v2.y)
+    assert(v1.y <= v2.y)
+
+    y0 := v0.y
+    y1 := v1.y
+    y2 := v2.y
+
+    if y1 == y2 {
+
+        fill_flat_bottom_triangle(v0, v1, v2)
+
+    } else if y0 == y1 {
+
+        fill_flat_top_triangle(v0, v1, v2)
+
+    } else {
+
+        t := inv_lerp(cast(f32)v0.y, cast(f32)v2.y, cast(f32)v1.y)
+        v3 := [2]int{cast(int)lerp(cast(f32)v0.x, cast(f32)v2.x, t), v1.y}
+
+        fill_flat_bottom_triangle(v0, v1, v3)
+        fill_flat_top_triangle(v1, v3, v2)
+    }
+
+    fill_flat_bottom_triangle :: proc(v0, v1, v2: [2]int) {
+
+        // Compute slopes.
+        m0 := cast(f32)(v1.x - v0.x) / cast(f32)(v1.y - v0.y)
+        m1 := cast(f32)(v2.x - v0.x) / cast(f32)(v2.y - v0.y)
+        if m1 < m0 do swap(&m0, &m1) // ???
+
+        x0 := cast(f32)v0.x
+        x1 := cast(f32)v0.x
+
+        for y := v0.y; y <= v1.y; y += 1 {
+
+            for x := cast(int)x0; x <= cast(int)x1; x += 1 {
+                if x >= 0 && x < screen.size.x && y >= 0 && y < screen.size.y {
+                    image_set_pixel(screen, x, y, transmute(Color)u32(0xFF339933)) // RED
+                }
+            }
+
+            x0 += m0
+            x1 += m1
+        }
+    }
+
+    fill_flat_top_triangle :: proc(v0, v1, v2: [2]int) {
+
+        // Compute slopes.
+        m0 := cast(f32)(v2.x - v0.x) / cast(f32)(v2.y - v0.y)
+        m1 := cast(f32)(v2.x - v1.x) / cast(f32)(v2.y - v1.y)
+        if m0 < m1 do swap(&m0, &m1) // ???
+
+        x0 := cast(f32)v2.x
+        x1 := cast(f32)v2.x
+
+        for y := v2.y; y > v0.y; y -= 1 {
+
+            for x := cast(int)x0; x <= cast(int)x1; x += 1 {
+                if x >= 0 && x < screen.size.x && y >= 0 && y < screen.size.y {
+                    image_set_pixel(screen, x, y, transmute(Color)u32(0xFF339933)) // GREEN
+                }
+            }
+
+            x0 -= m0
+            x1 -= m1
+        }
+    }
+
+    swap :: proc(x, y: ^$V) {
+        x^, y^ = y^, x^
+    }
+
+    lerp :: proc(a, b, t: f32) -> f32 {
+        return a + (b - a) * t
+    }
+
+    inv_lerp :: proc(a, b, v: f32) -> f32 {
+        return (v - a) / (b - a)
     }
 }
 
@@ -343,4 +518,9 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
         A = (cast(#simd[4]f32)(simd.shr(color, 24) & 0xFF)) / 0xFF
         return
     }
+}
+
+Triangle :: struct {
+    positions: [3]Vector4,
+    vertices:  [3]Vertex,
 }
