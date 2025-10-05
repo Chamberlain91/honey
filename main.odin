@@ -29,22 +29,28 @@ main :: proc() {
 
         // Populate image data for this frame.
         image_clear(screen, transmute(Color)(u32(0xFF181818)))
-        // slice.fill(screen_depth, 0.0) // clear depth buffer
-        mem.zero_slice(screen_depth)
+        mem.zero_slice(screen_depth) // zero clear, reversed-z
 
         time += toggles.pause ? 0 : get_time() - latest_time
         latest_time = get_time()
 
-        camera_position := Vector3{math.cos_f32(time / 3), 2.5, math.sin_f32(time / 5)} * 4
+        camera_position := Vector3{math.cos_f32(time / 3), 2.5, math.sin_f32(time / 5)} * 3
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
             linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 200.0) *
             linalg.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
 
-        render_mesh(mesh, assets.image, camera_matrix)
+        for y: f32 = 0.0; y < 30.0; y += 5.0 {
+            for x: f32 = 0.0; x < 30.0; x += 5.0 {
+
+                transform := linalg.matrix4_translate_f32({x, 0, y})
+
+                render_mesh(mesh, assets.image, camera_matrix * transform)
+            }
+        }
 
         status := fmt.tprintf(
-            "pause: {}, backface: {}, use-simd: {}, use-integer: {}",
+            "(Q) pause: {}\n(E) backface: {}\n(Z) use simd: {}\n(C) use integer: {}",
             toggles.pause,
             toggles.backface,
             toggles.use_simd,
@@ -94,7 +100,7 @@ toggles: struct {
     pause:       bool,
 } = {
     use_simd    = true,
-    use_integer = false,
+    use_integer = true,
     backface    = true,
     pause       = true,
 }
@@ -165,21 +171,47 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     b_ndc = map_to_viewport(b_ndc)
     c_ndc = map_to_viewport(c_ndc)
 
+    // Find triangle bounds...
+    triangle_min := linalg.array_cast(linalg.floor(linalg.min(a_ndc.xy, b_ndc.xy, c_ndc.xy)), int)
+    triangle_max := linalg.array_cast(linalg.ceil(linalg.max(a_ndc.xy, b_ndc.xy, c_ndc.xy)), int)
+
+    // ... clamp to screen.
+    triangle_min = linalg.clamp(triangle_min, 0, screen.size)
+    triangle_max = linalg.clamp(triangle_max, 0, screen.size)
+
+    // TILE_SIZE :: 256 // power-of-2 and multiple of 16?
+
+    // x_min := mem.align_backward_int(triangle_min.x, TILE_SIZE)
+    // y_min := mem.align_backward_int(triangle_min.y, TILE_SIZE)
+    // x_max := mem.align_forward_int(triangle_max.x, TILE_SIZE)
+    // y_max := mem.align_forward_int(triangle_max.y, TILE_SIZE)
+
+    // for y := y_min; y < y_max; y += TILE_SIZE {
+    //     for x := x_min; x < x_max; x += TILE_SIZE {
+
+    // tile_min := [2]int{x, y}
+    // tile_max := linalg.min(tile_min + TILE_SIZE, screen.size)
+
+    // ...clamped to screen.
+    viewport_min := triangle_min // linalg.clamp(triangle_min, tile_min, tile_max)
+    viewport_max := triangle_max // linalg.clamp(triangle_max, tile_min, tile_max)
+
     // Render the triangle!
     if toggles.use_simd {
-
         if toggles.use_integer {
-            rasterize_triangle_simd_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            rasterize_triangle_simd_int(a_ndc, b_ndc, c_ndc, a, b, c, viewport_min, viewport_max, image)
         } else {
-            rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, viewport_min, viewport_max, image)
         }
     } else {
         if toggles.use_integer {
-            rasterize_triangle_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            rasterize_triangle_int(a_ndc, b_ndc, c_ndc, a, b, c, viewport_min, viewport_max, image)
         } else {
-            rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, viewport_min, viewport_max, image)
         }
     }
+    //     }
+    // }
 
     // }
 
@@ -198,17 +230,19 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 }
 
 @(private = "file")
-rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle :: proc(
+    v0, v1, v2: Vector4,
+    a, b, c: Vertex,
+    viewport_min, viewport_max: [2]int,
+    image: Image,
+) #no_bounds_check {
 
-    screen_size := linalg.array_cast(screen.size, f32)
-
-    // Find triangle bounds.
-    triangle_min := linalg.floor(linalg.min(v0.xy, v1.xy, v2.xy))
-    triangle_max := linalg.ceil(linalg.max(v0.xy, v1.xy, v2.xy))
+    viewport_min := linalg.array_cast(viewport_min.xy, f32)
+    viewport_max := linalg.array_cast(viewport_max.xy, f32)
 
     // Find triangle bounds clamped to screen.
-    range_min := linalg.clamp(triangle_min, 0, screen_size)
-    range_max := linalg.clamp(triangle_max, 0, screen_size)
+    triangle_min := linalg.floor(linalg.clamp(linalg.min(v0.xy, v1.xy, v2.xy), viewport_min, viewport_max))
+    triangle_max := linalg.ceil(linalg.clamp(linalg.max(v0.xy, v1.xy, v2.xy), viewport_min, viewport_max))
 
     // Barycentric interpolation starting points.
     w0_row := signed_area(v1.xy, v2.xy, triangle_min)
@@ -221,13 +255,13 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
     v20 := v2 - v0
     v01 := v0 - v1
 
-    for y in range_min.y ..< range_max.y {
+    for y in triangle_min.y ..< triangle_max.y {
 
         w0_inc := w0_row
         w1_inc := w1_row
         w2_inc := w2_row
 
-        for x in range_min.x ..< range_max.x {
+        for x in triangle_min.x ..< triangle_max.x {
 
             w0 := w0_inc
             w1 := w1_inc
@@ -293,7 +327,12 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
 }
 
 @(private = "file")
-rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle_int :: proc(
+    v0, v1, v2: Vector4,
+    a, b, c: Vertex,
+    triangle_min, triangle_max: [2]int,
+    image: Image,
+) #no_bounds_check {
 
     // Get triangle positions on the integer grid.
     p0 := linalg.array_cast(v0.xy, int)
@@ -306,14 +345,6 @@ rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Imag
     if area == 0 {
         return
     }
-
-    // Find triangle bounds.
-    triangle_min := linalg.min(p0, p1, p2)
-    triangle_max := linalg.max(p0, p1, p2)
-
-    // Find triangle bounds clamped to screen.
-    range_min := linalg.clamp(triangle_min, 0, screen.size)
-    range_max := linalg.clamp(triangle_max, 0, screen.size)
 
     // Precompuse inverse area to optimize interpolation.
     inv_area := 1.0 / cast(f32)area
@@ -329,12 +360,12 @@ rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Imag
     delta_w_col: [3]int = {p1.y - p2.y, p2.y - p0.y, p0.y - p1.y}
     delta_w_row: [3]int = {p2.x - p1.x, p0.x - p2.x, p1.x - p0.x}
 
-    for y in range_min.y ..< range_max.y {
+    for y in triangle_min.y ..< triangle_max.y {
 
         defer w_row += delta_w_row
         w_col := w_row
 
-        for x in range_min.x ..< range_max.x {
+        for x in triangle_min.x ..< triangle_max.x {
 
             defer w_col += delta_w_col
 
@@ -388,24 +419,27 @@ rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Imag
 }
 
 @(private = "file")
-rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle_simd :: proc(
+    v0, v1, v2: Vector4,
+    a, b, c: Vertex,
+    viewport_min, viewport_max: [2]int,
+    image: Image,
+) #no_bounds_check {
 
-    screen_size := linalg.array_cast(screen.size, f32)
-
-    // Find triangle bounds.
-    triangle_min := linalg.floor(linalg.min(v0.xy, v1.xy, v2.xy))
-    triangle_max := linalg.ceil(linalg.max(v0.xy, v1.xy, v2.xy))
+    // Get viewport rect on the float grid.
+    viewport_min := linalg.array_cast(viewport_min, f32)
+    viewport_max := linalg.array_cast(viewport_max, f32)
 
     // Find triangle bounds clamped to screen.
-    range_min := linalg.clamp(triangle_min, 0, screen_size)
-    range_max := linalg.clamp(triangle_max, 0, screen_size)
+    triangle_min := linalg.floor(linalg.clamp(linalg.min(v0.xy, v1.xy, v2.xy), viewport_min, viewport_max))
+    triangle_max := linalg.ceil(linalg.clamp(linalg.max(v0.xy, v1.xy, v2.xy), viewport_min, viewport_max))
 
     // SIMD reads and writes need to be 16 byte aligned.
-    align_min_x := cast(f32)mem.align_backward_int(cast(int)range_min.x, 4)
-    align_max_x := cast(f32)mem.align_forward_int(cast(int)math.ceil(range_max.x), 4)
+    align_min_x := cast(f32)mem.align_backward_int(cast(int)triangle_min.x, 4)
+    align_max_x := cast(f32)mem.align_forward_int(cast(int)triangle_max.x, 4)
 
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
-    align_offset := align_min_x - range_min.x
+    align_offset := align_min_x - triangle_min.x
 
     // Barycentric interpolation starting points.
     w0_row := signed_area(v1.xy, v2.xy, triangle_min)
@@ -424,7 +458,7 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
     steps_v20y := v20.y * Step_Sizes
     steps_v01y := v01.y * Step_Sizes
 
-    for y in range_min.y ..< range_max.y {
+    for y in triangle_min.y ..< triangle_max.y {
 
         w0_inc := w0_row + (align_offset * v12.y)
         w1_inc := w1_row + (align_offset * v20.y)
@@ -533,12 +567,21 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
 }
 
 @(private = "file")
-rasterize_triangle_simd_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+rasterize_triangle_simd_int :: proc(
+    v0, v1, v2: Vector4,
+    a, b, c: Vertex,
+    viewport_min, viewport_max: [2]int,
+    image: Image,
+) #no_bounds_check {
 
     // Get triangle positions on the integer grid.
     p0 := linalg.array_cast(v0.xy, i32)
     p1 := linalg.array_cast(v1.xy, i32)
     p2 := linalg.array_cast(v2.xy, i32)
+
+    // Get viewport rect on the integer grid.
+    viewport_min := linalg.array_cast(viewport_min, i32)
+    viewport_max := linalg.array_cast(viewport_max, i32)
 
     // Triangle is smaller than a pixel.
     // TODO: Should this just write a vertex "a" fragment?
@@ -547,20 +590,16 @@ rasterize_triangle_simd_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image:
         return
     }
 
-    // Find triangle bounds.
-    triangle_min := linalg.min(p0, p1, p2)
-    triangle_max := linalg.max(p0, p1, p2)
-
     // Find triangle bounds clamped to screen.
-    range_min := linalg.clamp(triangle_min, 0, linalg.array_cast(screen.size, i32))
-    range_max := linalg.clamp(triangle_max, 0, linalg.array_cast(screen.size, i32))
+    triangle_min := linalg.clamp(linalg.min(p0, p1, p2), viewport_min, viewport_max)
+    triangle_max := linalg.clamp(linalg.max(p0, p1, p2), viewport_min, viewport_max)
 
     // SIMD reads and writes need to be 16 byte aligned.
-    align_min_x := cast(i32)mem.align_backward_int(cast(int)range_min.x, 4)
-    align_max_x := cast(i32)mem.align_forward_int(cast(int)range_max.x, 4)
+    align_min_x := cast(i32)mem.align_backward_int(cast(int)triangle_min.x, 4)
+    align_max_x := cast(i32)mem.align_forward_int(cast(int)triangle_max.x, 4)
 
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
-    align_offset := align_min_x - range_min.x
+    align_offset := align_min_x - triangle_min.x
 
     // Barycentric interpolation starting points.
     w0_row := signed_area(p1, p2, triangle_min)
@@ -580,7 +619,7 @@ rasterize_triangle_simd_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image:
     steps_v20y := p20.y * Step_Sizes
     steps_v01y := p01.y * Step_Sizes
 
-    for y in range_min.y ..< range_max.y {
+    for y in triangle_min.y ..< triangle_max.y {
 
         w0_inc := w0_row + (align_offset * p12.y)
         w1_inc := w1_row + (align_offset * p20.y)
@@ -695,10 +734,4 @@ rasterize_triangle_simd_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image:
 @(private = "file")
 signed_area :: #force_inline proc(a, b, c: [2]$V) -> V {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-}
-
-@(private = "file")
-Triangle :: struct {
-    positions: [3]Vector4,
-    vertices:  [3]Vertex,
 }
