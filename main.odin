@@ -6,7 +6,6 @@ import "base:intrinsics"
 import "core:math/linalg"
 import "core:mem"
 import "core:simd"
-import "core:slice"
 
 Sun_Direction := linalg.normalize(Vector3{1, 3, -2})
 
@@ -45,11 +44,10 @@ main :: proc() {
         render_mesh(mesh, assets.image, camera_matrix)
 
         status := fmt.tprintf(
-            "pause: {}, backface: {}, use-simd: {}, use-split: {}, use-integer: {}",
+            "pause: {}, backface: {}, use-simd: {}, use-integer: {}",
             toggles.pause,
             toggles.backface,
             toggles.use_simd,
-            toggles.use_split,
             toggles.use_integer,
         )
         update_screen_pixels(status)
@@ -74,11 +72,6 @@ main :: proc() {
             toggles.use_simd = !toggles.use_simd
         }
 
-        // Toggle scanline triangle paths.
-        if is_key_pressed(.X) {
-            toggles.use_split = !toggles.use_split
-        }
-
         // Toggle integer precision computations.
         if is_key_pressed(.C) {
             toggles.use_integer = !toggles.use_integer
@@ -96,13 +89,11 @@ assets: struct {
 
 toggles: struct {
     use_simd:    bool,
-    use_split:   bool,
     use_integer: bool,
     backface:    bool,
     pause:       bool,
 } = {
     use_simd    = true,
-    use_split   = false,
     use_integer = false,
     backface    = true,
     pause       = true,
@@ -176,20 +167,17 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     // Render the triangle!
     if toggles.use_simd {
-        if toggles.use_split {
-            // TODO: rasterize_triangle_split_simd
+
+        if toggles.use_integer {
+            rasterize_triangle_simd_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
         } else {
             rasterize_triangle_simd(a_ndc, b_ndc, c_ndc, a, b, c, image)
         }
     } else {
-        if toggles.use_split {
-            rasterize_triangle_split(a_ndc.xy, b_ndc.xy, c_ndc.xy)
+        if toggles.use_integer {
+            rasterize_triangle_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
         } else {
-            if toggles.use_integer {
-                rasterize_triangle_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
-            } else {
-                rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
-            }
+            rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
         }
     }
 
@@ -206,131 +194,6 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     vertex_shader :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
         return transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
-    }
-}
-
-@(private = "file")
-rasterize_triangle_split :: proc(v0, v1, v2: Vector2) #no_bounds_check {
-
-    // Reference:
-    // - https://www.sunshine2k.de/coding/java/TriangleRasterization/TriangleRasterization.html
-
-    // BOTTOM FLAT ONLY
-    //
-    //        # - 0
-    //       # #
-    //      #   #
-    // 1 - ####### - 2
-    //
-    // TOP FLAT ONLY
-    //
-    // 0 - ####### - 1
-    //      ##    #
-    //        ##   #
-    //          ##  #
-    //            ## #
-    //              ###
-    //                ## - 2
-    //
-    // BOTH COMPUTE SPLIT
-    //
-    //        # - 0
-    //       # #
-    //      #   #
-    // 1 - #-----# - 3
-    //      ##    #
-    //        ##   #
-    //          ##  #
-    //            ## #
-    //              ###
-    //                ## - 2
-
-    v0 := linalg.array_cast(v0, int)
-    v1 := linalg.array_cast(v1, int)
-    v2 := linalg.array_cast(v2, int)
-
-    // Sort small to high
-    if v0.y > v1.y do swap(&v0, &v1)
-    if v1.y > v2.y do swap(&v1, &v2)
-    if v0.y > v1.y do swap(&v0, &v1)
-
-    assert(v0.y <= v1.y)
-    assert(v0.y <= v2.y)
-    assert(v1.y <= v2.y)
-
-    if v1.y == v2.y {
-
-        fill_flat_bottom_triangle(v0, v1, v2)
-
-    } else if v0.y == v1.y {
-
-        fill_flat_top_triangle(v0, v1, v2)
-
-    } else {
-
-        t := inv_lerp(cast(f32)v0.y, cast(f32)v2.y, cast(f32)v1.y)
-        v3 := [2]int{cast(int)lerp(cast(f32)v0.x, cast(f32)v2.x, t), v1.y}
-
-        fill_flat_bottom_triangle(v0, v1, v3)
-        fill_flat_top_triangle(v1, v3, v2)
-    }
-
-    fill_flat_bottom_triangle :: proc(v0, v1, v2: [2]int) {
-
-        // Compute slopes.
-        m0 := cast(f32)(v1.x - v0.x) / cast(f32)(v1.y - v0.y)
-        m1 := cast(f32)(v2.x - v0.x) / cast(f32)(v2.y - v0.y)
-        if m1 < m0 do swap(&m0, &m1) // ???
-
-        x0 := cast(f32)v0.x
-        x1 := cast(f32)v0.x
-
-        for y := v0.y; y <= v1.y; y += 1 {
-
-            for x := cast(int)x0; x <= cast(int)x1; x += 1 {
-                if x >= 0 && x < screen.size.x && y >= 0 && y < screen.size.y {
-                    image_set_pixel(screen, x, y, transmute(Color)u32(0xFF339933)) // RED
-                }
-            }
-
-            x0 += m0
-            x1 += m1
-        }
-    }
-
-    fill_flat_top_triangle :: proc(v0, v1, v2: [2]int) {
-
-        // Compute slopes.
-        m0 := cast(f32)(v2.x - v0.x) / cast(f32)(v2.y - v0.y)
-        m1 := cast(f32)(v2.x - v1.x) / cast(f32)(v2.y - v1.y)
-        if m0 < m1 do swap(&m0, &m1) // ???
-
-        x0 := cast(f32)v2.x
-        x1 := cast(f32)v2.x
-
-        for y := v2.y; y > v0.y; y -= 1 {
-
-            for x := cast(int)x0; x <= cast(int)x1; x += 1 {
-                if x >= 0 && x < screen.size.x && y >= 0 && y < screen.size.y {
-                    image_set_pixel(screen, x, y, transmute(Color)u32(0xFF339933)) // GREEN
-                }
-            }
-
-            x0 -= m0
-            x1 -= m1
-        }
-    }
-
-    swap :: proc(x, y: ^$V) {
-        x^, y^ = y^, x^
-    }
-
-    lerp :: proc(a, b, t: f32) -> f32 {
-        return a + (b - a) * t
-    }
-
-    inv_lerp :: proc(a, b, v: f32) -> f32 {
-        return (v - a) / (b - a)
     }
 }
 
@@ -512,7 +375,7 @@ rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Imag
             pixel.a = 0xFF // no transparency
 
             // Write color
-            image_set_pixel(screen, cast(int)x, cast(int)y, pixel)
+            image_set_pixel(screen, x, y, pixel)
 
             // Write depth
             depth_ptr[0] = depth
@@ -577,8 +440,8 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
             w1_inc += v20.y * 4
             w2_inc += v01.y * 4
 
-            write_mask := cast(#simd[4]u32)(0) // w0 >= 0 && w1 >= 0 && w2 >= 0
-            write_mask = ~write_mask & simd.lanes_ge(w0, (#simd[4]f32)(0))
+            write_mask := cast(#simd[4]u32)(~u32(0))
+            write_mask = write_mask & simd.lanes_ge(w0, (#simd[4]f32)(0))
             write_mask = write_mask & simd.lanes_ge(w1, (#simd[4]f32)(0))
             write_mask = write_mask & simd.lanes_ge(w2, (#simd[4]f32)(0))
 
@@ -592,12 +455,12 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
 
             ndc_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
             ndc_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
-            depth := ndc_z / ndc_w
+            depth := ndc_w / ndc_z
 
             // ---- DEPTH TEST ----
 
             depth_ptr := cast(^#simd[4]f32)raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
-            write_mask = write_mask & simd.lanes_lt(depth, depth_ptr^)
+            write_mask = write_mask & simd.lanes_gt(depth, depth_ptr^)
 
             if simd.reduce_or(write_mask) == 0 {
                 continue // all fragments are hidden
@@ -638,6 +501,166 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
         w0_row -= v12.x
         w1_row -= v20.x
         w2_row -= v01.x
+    }
+
+    edge :: #force_inline proc(a, ab: Vector2, cx, cy: #simd[4]f32) -> #simd[4]f32 {
+        return ((a.y - cy) * ab.x) - ((a.x - cx) * ab.y)
+    }
+
+    interpolate :: proc(a, b, c, w0, w1, w2: #simd[4]f32) -> #simd[4]f32 {
+        return (a * w0) + (b * w1) + (c * w2)
+    }
+
+    dot :: proc(ax, ay, az: #simd[4]f32, b: Vector3) -> #simd[4]f32 {
+        return interpolate(ax, ay, az, b.x, b.y, b.z)
+    }
+
+    convert_f32_to_u32_simd :: proc(R, G, B, A: #simd[4]f32) -> #simd[4]u32 {
+        Ri := cast(#simd[4]u32)(R * 0xFF)
+        Gi := simd.shl(cast(#simd[4]u32)(G * 0xFF), 8)
+        Bi := simd.shl(cast(#simd[4]u32)(B * 0xFF), 16)
+        Ai := simd.shl(cast(#simd[4]u32)(A * 0xFF), 24)
+        return Ri | Gi | Bi | Ai
+    }
+
+    convert_u32_to_f32_simd :: proc(color: #simd[4]u32) -> (R, G, B, A: #simd[4]f32) {
+        R = (cast(#simd[4]f32)(color & 0xFF)) / 0xFF
+        G = (cast(#simd[4]f32)(simd.shr(color, 8) & 0xFF)) / 0xFF
+        B = (cast(#simd[4]f32)(simd.shr(color, 16) & 0xFF)) / 0xFF
+        A = (cast(#simd[4]f32)(simd.shr(color, 24) & 0xFF)) / 0xFF
+        return
+    }
+}
+
+@(private = "file")
+rasterize_triangle_simd_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+
+    // Get triangle positions on the integer grid.
+    p0 := linalg.array_cast(v0.xy, i32)
+    p1 := linalg.array_cast(v1.xy, i32)
+    p2 := linalg.array_cast(v2.xy, i32)
+
+    // Triangle is smaller than a pixel.
+    // TODO: Should this just write a vertex "a" fragment?
+    area := signed_area(p0, p1, p2)
+    if area == 0 {
+        return
+    }
+
+    // Find triangle bounds.
+    triangle_min := linalg.min(p0, p1, p2)
+    triangle_max := linalg.max(p0, p1, p2)
+
+    // Find triangle bounds clamped to screen.
+    range_min := linalg.clamp(triangle_min, 0, linalg.array_cast(screen.size, i32))
+    range_max := linalg.clamp(triangle_max, 0, linalg.array_cast(screen.size, i32))
+
+    // SIMD reads and writes need to be 16 byte aligned.
+    align_min_x := cast(i32)mem.align_backward_int(cast(int)range_min.x, 4)
+    align_max_x := cast(i32)mem.align_forward_int(cast(int)range_max.x, 4)
+
+    // Since SIMD is aligned, we need to offset the incremental barycentric too.
+    align_offset := align_min_x - range_min.x
+
+    // Barycentric interpolation starting points.
+    w0_row := signed_area(p1, p2, triangle_min)
+    w1_row := signed_area(p2, p0, triangle_min)
+    w2_row := signed_area(p0, p1, triangle_min)
+
+    // Precompuse inverse area to optimize interpolation.
+    inv_area := 1.0 / cast(f32)area
+
+    p12 := p1 - p2
+    p20 := p2 - p0
+    p01 := p0 - p1
+
+    Step_Sizes :: (#simd[4]i32){0, 1, 2, 3}
+
+    steps_v12y := p12.y * Step_Sizes
+    steps_v20y := p20.y * Step_Sizes
+    steps_v01y := p01.y * Step_Sizes
+
+    for y in range_min.y ..< range_max.y {
+
+        w0_inc := w0_row + (align_offset * p12.y)
+        w1_inc := w1_row + (align_offset * p20.y)
+        w2_inc := w2_row + (align_offset * p01.y)
+
+        defer {
+            w0_row -= p12.x
+            w1_row -= p20.x
+            w2_row -= p01.x
+        }
+
+        for x := align_min_x; x < align_max_x; x += 4 {
+
+            w0_steps := w0_inc + steps_v12y
+            w1_steps := w1_inc + steps_v20y
+            w2_steps := w2_inc + steps_v01y
+
+            defer {
+                w0_inc += p12.y * 4
+                w1_inc += p20.y * 4
+                w2_inc += p01.y * 4
+            }
+
+            write_mask := cast(#simd[4]u32)(0) // w0 >= 0 && w1 >= 0 && w2 >= 0
+            write_mask = ~write_mask & simd.lanes_ge(w0_steps, (#simd[4]i32)(0))
+            write_mask = write_mask & simd.lanes_ge(w1_steps, (#simd[4]i32)(0))
+            write_mask = write_mask & simd.lanes_ge(w2_steps, (#simd[4]i32)(0))
+
+            if simd.reduce_or(write_mask) == 0 {
+                continue // all fragments are outside the triangle
+            }
+
+            w0 := (#simd[4]f32)(w0_steps) * inv_area
+            w1 := (#simd[4]f32)(w1_steps) * inv_area
+            w2 := (#simd[4]f32)(w2_steps) * inv_area
+
+            ndc_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
+            ndc_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
+            depth := ndc_w / ndc_z
+
+            // ---- DEPTH TEST ----
+
+            depth_ptr := cast(^#simd[4]f32)raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
+            write_mask = write_mask & simd.lanes_gt(depth, depth_ptr^)
+
+            if simd.reduce_or(write_mask) == 0 {
+                continue // all fragments are hidden
+            }
+
+            // ---- INTERPOLATOR ---
+
+            NX := interpolate(a.normal.x, b.normal.x, c.normal.x, w0, w1, w2)
+            NY := interpolate(a.normal.y, b.normal.y, c.normal.y, w0, w1, w2)
+            NZ := interpolate(a.normal.z, b.normal.z, c.normal.z, w0, w1, w2)
+
+            U := interpolate(a.uv.x, b.uv.x, c.uv.x, w0, w1, w2)
+            V := interpolate(a.uv.y, b.uv.y, c.uv.y, w0, w1, w2)
+
+            // ---- FRAGMENT SHADER BEGIN ---
+
+            R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(image, U, V))
+
+            brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, Sun_Direction)) * 0.75)
+
+            R *= brightness
+            G *= brightness
+            B *= brightness
+
+            pixels := convert_f32_to_u32_simd(R, G, B, A)
+
+            // ---- FRAGMENT SHADER END ---
+
+            // Write color.
+            pixel_ptr := cast(^#simd[4]u32)image_get_pixel_ptr(screen, cast(int)x, cast(int)y)
+            pixel_ptr^ = (pixels & write_mask) | (pixel_ptr^ &~ write_mask)
+
+            // Write depth.
+            depth_ptr^ = transmute(#simd[4]f32)((transmute(#simd[4]u32)depth & write_mask) |
+                (transmute(#simd[4]u32)(depth_ptr^) &~ write_mask))
+        }
     }
 
     edge :: #force_inline proc(a, ab: Vector2, cx, cy: #simd[4]f32) -> #simd[4]f32 {
