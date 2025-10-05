@@ -30,7 +30,8 @@ main :: proc() {
 
         // Populate image data for this frame.
         image_clear(screen, transmute(Color)(u32(0xFF181818)))
-        slice.fill(screen_depth, 1.0) // clear depth buffer
+        // slice.fill(screen_depth, 0.0) // clear depth buffer
+        mem.zero_slice(screen_depth)
 
         time += toggles.pause ? 0 : get_time() - latest_time
         latest_time = get_time()
@@ -44,11 +45,12 @@ main :: proc() {
         render_mesh(mesh, assets.image, camera_matrix)
 
         status := fmt.tprintf(
-            "pause: {}, backface: {}, use-simd: {}, use-split: {}",
+            "pause: {}, backface: {}, use-simd: {}, use-split: {}, use-integer: {}",
             toggles.pause,
             toggles.backface,
             toggles.use_simd,
             toggles.use_split,
+            toggles.use_integer,
         )
         update_screen_pixels(status)
 
@@ -76,11 +78,16 @@ main :: proc() {
         if is_key_pressed(.X) {
             toggles.use_split = !toggles.use_split
         }
+
+        // Toggle integer precision computations.
+        if is_key_pressed(.C) {
+            toggles.use_integer = !toggles.use_integer
+        }
     }
 }
 
-SCREEN_W :: 960
-SCREEN_H :: 540
+SCREEN_W :: 800
+SCREEN_H :: 500
 FACTOR :: 2
 
 assets: struct {
@@ -88,15 +95,17 @@ assets: struct {
 }
 
 toggles: struct {
-    use_simd:  bool,
-    use_split: bool,
-    backface:  bool,
-    pause:     bool,
+    use_simd:    bool,
+    use_split:   bool,
+    use_integer: bool,
+    backface:    bool,
+    pause:       bool,
 } = {
-    use_simd  = false,
-    use_split = false,
-    backface  = true,
-    pause     = true,
+    use_simd    = true,
+    use_split   = false,
+    use_integer = false,
+    backface    = true,
+    pause       = true,
 }
 
 // -----------------------------------------------------------------------------
@@ -131,7 +140,10 @@ render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
 render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     // Reference:
-    // -https://jtsorlinis.github.io/rendering-tutorial/
+    // - https://github.com/kristoffer-dyrkorn/triangle-rasterizer/blob/main/9/triangle.js
+    // - https://fgiesen.wordpress.com/2013/02/10/optimizing-the-basic-rasterizer/
+    // - https://jtsorlinis.github.io/rendering-tutorial/
+    // - https://github.com/gustavopezzi/triangle-rasterizer-int
 
     // Transform
     a_ndc := vertex_shader(a, transform)
@@ -173,7 +185,11 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
         if toggles.use_split {
             rasterize_triangle_split(a_ndc.xy, b_ndc.xy, c_ndc.xy)
         } else {
-            rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            if toggles.use_integer {
+                rasterize_triangle_int(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            } else {
+                rasterize_triangle(a_ndc, b_ndc, c_ndc, a, b, c, image)
+            }
         }
     }
 
@@ -323,6 +339,7 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
 
     screen_size := linalg.array_cast(screen.size, f32)
 
+    // Find triangle bounds.
     triangle_min := linalg.floor(linalg.min(v0.xy, v1.xy, v2.xy))
     triangle_max := linalg.ceil(linalg.max(v0.xy, v1.xy, v2.xy))
 
@@ -330,15 +347,16 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
     range_min := linalg.clamp(triangle_min, 0, screen_size)
     range_max := linalg.clamp(triangle_max, 0, screen_size)
 
+    // Barycentric interpolation starting points.
     w0_row := signed_area(v1.xy, v2.xy, triangle_min)
     w1_row := signed_area(v2.xy, v0.xy, triangle_min)
     w2_row := signed_area(v0.xy, v1.xy, triangle_min)
 
-    wT := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
+    inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
 
-    v01 := v0 - v1
     v12 := v1 - v2
     v20 := v2 - v0
+    v01 := v0 - v1
 
     for y in range_min.y ..< range_max.y {
 
@@ -363,18 +381,18 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
                 continue
             }
 
-            w0 *= wT
-            w1 *= wT
-            w2 *= wT
+            w0 *= inv_area
+            w1 *= inv_area
+            w2 *= inv_area
 
             ndc := interpolate(v0, v1, v2, w0, w1, w2)
-            depth := ndc.z / ndc.w
+            depth := ndc.w / ndc.z
 
             // ---- DEPTH TEST ----
 
             depth_ptr := raw_data(screen_depth)[(cast(int)y * screen.size.x) + cast(int)x:]
 
-            if depth > depth_ptr[0] {
+            if depth < depth_ptr[0] {
                 continue // fragment hidden
             }
 
@@ -412,6 +430,101 @@ rasterize_triangle :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #
 }
 
 @(private = "file")
+rasterize_triangle_int :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
+
+    // Get triangle positions on the integer grid.
+    p0 := linalg.array_cast(v0.xy, int)
+    p1 := linalg.array_cast(v1.xy, int)
+    p2 := linalg.array_cast(v2.xy, int)
+
+    // Triangle is smaller than a pixel.
+    // TODO: Should this just write a vertex "a" fragment?
+    area := signed_area(p0, p1, p2)
+    if area == 0 {
+        return
+    }
+
+    // Find triangle bounds.
+    triangle_min := linalg.min(p0, p1, p2)
+    triangle_max := linalg.max(p0, p1, p2)
+
+    // Find triangle bounds clamped to screen.
+    range_min := linalg.clamp(triangle_min, 0, screen.size)
+    range_max := linalg.clamp(triangle_max, 0, screen.size)
+
+    // Precompuse inverse area to optimize interpolation.
+    inv_area := 1.0 / cast(f32)area
+
+    // Barycentric interpolation starting points.
+    w_row: [3]int = {
+        signed_area(p1, p2, triangle_min),
+        signed_area(p2, p0, triangle_min),
+        signed_area(p0, p1, triangle_min),
+    }
+
+    // Incremental barycentric interpolation step factors.
+    delta_w_col: [3]int = {p1.y - p2.y, p2.y - p0.y, p0.y - p1.y}
+    delta_w_row: [3]int = {p2.x - p1.x, p0.x - p2.x, p1.x - p0.x}
+
+    for y in range_min.y ..< range_max.y {
+
+        defer w_row += delta_w_row
+        w_col := w_row
+
+        for x in range_min.x ..< range_max.x {
+
+            defer w_col += delta_w_col
+
+            if (w_col[0] | w_col[1] | w_col[2]) < 0 {
+                continue
+            }
+
+            w0 := cast(f32)w_col[0] * inv_area
+            w1 := cast(f32)w_col[1] * inv_area
+            w2 := cast(f32)w_col[2] * inv_area
+
+            ndc := interpolate(v0, v1, v2, w0, w1, w2)
+            depth := ndc.w / ndc.z
+
+            // ---- DEPTH TEST ----
+
+            depth_ptr := raw_data(screen_depth)[(y * screen.size.x) + x:]
+
+            if depth < depth_ptr[0] {
+                continue // fragment hidden
+            }
+
+            // ---- VERTEX INTERPOLATOR ---
+
+            // TODO: Normalize?
+            fragment_normal := interpolate(a.normal, b.normal, c.normal, w0, w1, w2)
+            fragment_uv := interpolate(a.uv, b.uv, c.uv, w0, w1, w2)
+
+            // ---- FRAGMENT SHADER BEGIN ---
+
+            pixel := image_sample(image, fragment_uv)
+
+            brightness := max(0.0, linalg.dot(fragment_normal, Sun_Direction))
+            pixel = mix_color(0, pixel, 0.25 + (brightness * 0.75))
+
+            // ---- FRAGMENT SHADER END ---
+
+            pixel.a = 0xFF // no transparency
+
+            // Write color
+            image_set_pixel(screen, cast(int)x, cast(int)y, pixel)
+
+            // Write depth
+            depth_ptr[0] = depth
+        }
+    }
+
+    interpolate :: proc(a, b, c: $T, w0, w1, w2: f32) -> T {
+        return (a * w0) + (b * w1) + (c * w2)
+    }
+}
+
+@(private = "file")
 rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Image) #no_bounds_check {
 
     screen_size := linalg.array_cast(screen.size, f32)
@@ -431,15 +544,22 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
     align_offset := align_min_x - range_min.x
 
+    // Barycentric interpolation starting points.
     w0_row := signed_area(v1.xy, v2.xy, triangle_min)
     w1_row := signed_area(v2.xy, v0.xy, triangle_min)
     w2_row := signed_area(v0.xy, v1.xy, triangle_min)
 
-    wT := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
+    inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
 
-    v01 := v0 - v1
     v12 := v1 - v2
     v20 := v2 - v0
+    v01 := v0 - v1
+
+    Step_Sizes :: (#simd[4]f32){0, 1, 2, 3}
+
+    steps_v12y := v12.y * Step_Sizes
+    steps_v20y := v20.y * Step_Sizes
+    steps_v01y := v01.y * Step_Sizes
 
     for y in range_min.y ..< range_max.y {
 
@@ -449,11 +569,9 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
 
         for x := align_min_x; x < align_max_x; x += 4 {
 
-            Step_Sizes :: (#simd[4]f32){0, 1, 2, 3}
-
-            w0 := w0_inc + (v12.y * Step_Sizes)
-            w1 := w1_inc + (v20.y * Step_Sizes)
-            w2 := w2_inc + (v01.y * Step_Sizes)
+            w0 := w0_inc + steps_v12y
+            w1 := w1_inc + steps_v20y
+            w2 := w2_inc + steps_v01y
 
             w0_inc += v12.y * 4
             w1_inc += v20.y * 4
@@ -468,9 +586,9 @@ rasterize_triangle_simd :: proc(v0, v1, v2: Vector4, a, b, c: Vertex, image: Ima
                 continue // all fragments are outside the triangle
             }
 
-            w0 *= wT
-            w1 *= wT
-            w2 *= wT
+            w0 *= inv_area
+            w1 *= inv_area
+            w2 *= inv_area
 
             ndc_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
             ndc_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
