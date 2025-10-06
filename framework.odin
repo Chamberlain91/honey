@@ -241,6 +241,7 @@ image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bo
     offsets := (ys * cast(i32)image.size.x) + xs
 
     // Read the requested image data.
+    // TODO: https://github.com/odin-lang/Odin/issues/5737
     addrs := image.simd.begin + cast(#simd[4]uintptr)(offsets * size_of(Color))
     // Ensure pointers valid to access.
     addrs = simd.clamp(addrs, image.simd.begin, image.simd.end)
