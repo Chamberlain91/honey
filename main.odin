@@ -1,13 +1,15 @@
 package honey
 
 import "base:intrinsics"
+import sa "core:container/small_array"
 @(require) import "core:fmt"
 @(require) import "core:math"
-import "core:math/linalg"
+import la "core:math/linalg"
 import "core:mem"
 import "core:simd"
+import "core:slice"
 
-Sun_Direction := linalg.normalize(Vector3{1, 3, -2})
+Sun_Direction := la.normalize(Vector3{1, 3, -2})
 
 latest_time: f32
 time: f32
@@ -38,8 +40,8 @@ main :: proc() {
     main_loop: for is_window_open() {
 
         // Populate image data for this frame.
-        image_clear(screen, transmute(Color)(u32(0xFF181818)))
-        mem.zero_slice(screen_depth) // clear depth (depth is -1/z form)
+        image_clear(screen, transmute(Color)(u32(0xFF181818))) // clear color
+        slice.fill(screen_depth, 1.0) // clear depth
 
         time += toggles.pause ? 0 : get_time() - latest_time
         latest_time = get_time()
@@ -47,22 +49,31 @@ main :: proc() {
         camera_position := Vector3{math.cos_f32(time / 3), 1.5, math.sin_f32(time / 5)} * 5
         camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
-            linalg.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 200.0) *
-            linalg.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
+            la.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 50.0) *
+            la.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
+
+        min_z = max(f32)
+        max_z = min(f32)
 
         for y: f32 = -15; y <= 15; y += 5.0 {
             for x: f32 = -15; x <= 15; x += 5.0 {
-                transform := linalg.matrix4_translate_f32({x, x * 0.5, y})
+                transform := la.matrix4_translate_f32({x, x * 0.5, y})
                 render_mesh(mesh, assets.image, camera_matrix * transform)
             }
         }
         render_mesh(quad, assets.image, camera_matrix)
 
+        min_depth, max_depth, _ := slice.min_max(screen_depth)
+
         status := fmt.tprintf(
-            "(Q) pause: {}\n(E) backface: {}\n(Z) use simd: {}",
+            "(Q) pause: {}\n(E) backface: {}\n(Z) use simd: {}\ndepth range: {:0.4f} to {:0.4f}\nz range: {:0.4f} to {:0.4f}",
             toggles.pause,
             toggles.backface,
             toggles.use_simd,
+            min_depth,
+            max_depth,
+            min_z,
+            max_z,
         )
         update_screen_pixels(status)
 
@@ -101,7 +112,7 @@ toggles: struct {
     backface: bool,
     pause:    bool,
 } = {
-    use_simd = false,
+    use_simd = true,
     backface = true,
     pause    = true,
 }
@@ -135,6 +146,8 @@ render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
     }
 }
 
+min_z, max_z: f32
+
 render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
 
     // Reference:
@@ -143,90 +156,155 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     // - https://jtsorlinis.github.io/rendering-tutorial/
     // - https://github.com/gustavopezzi/triangle-rasterizer-int
 
-    // Transform (World to NDC)
-    tri_ndc: [3]Vector4 = {     //
-        world_to_ndc(a, transform),
-        world_to_ndc(b, transform),
-        world_to_ndc(c, transform),
-    }
+    @(thread_local)
+    triangles: sa.Small_Array(16, Triangle)
 
-    // Homogenize (perspective divide)
-    for &ndc in tri_ndc {
-        ndc.w = 1.0 / ndc.w
-        ndc.xyz *= ndc.w
-    }
+    sa.clear(&triangles)
+    sa.append(
+        &triangles,
+        Triangle {
+            positions = {
+                // World -> NDC as (x, y, z, 1/w)
+                transform_vertex(a, transform),
+                transform_vertex(b, transform),
+                transform_vertex(c, transform),
+            },
+            vertices  = {a, b, c},
+        },
+    )
 
-    // Backface culling (counter-clockwise)
-    // TODO: The backfaces aren't actually rendered properly when this branch is eliminated, so I need to figure out that bug.
-    if toggles.backface && signed_area(tri_ndc[0].xy, tri_ndc[1].xy, tri_ndc[2].xy) < 0 {
+    // Backface culling.
+    if toggles.backface && !is_frontface(sa.get(triangles, 0)) {
         return
     }
 
-    // TODO: Frustum plane clipping (near plane clipping at minimum)
+    // TODO: Clipping planes.
+    {
+        triangle := sa.pop_back(&triangles)
 
-    for &ndc in tri_ndc {
+        // Case 0 (no clipping, emit 1 triangle)
+        //     +
+        //    + +
+        //   +   +
+        //  +-----+
+        // --------- near
 
-        // NEAR PLANE REJECTION
-        if ndc.z < 0 do return
+        // Case 1 (emit 2 triangles)
+        // +-------+
+        //  +     +
+        //   +---+ near
+        //    + +
+        //     +
 
-        // FAR PLANE REJECTION
-        if ndc.z > 1 do return
+        // Case 2 (emit 1 triangle)
+        //     +
+        //    + +
+        //   +---+ near
+        //  +     +
+        // +-------+
 
-        // Side planes
-        if ndc.x < -1 do return // X- PLANE REJECTION
-        if ndc.x > +1 do return // X+ PLANE REJECTION
-        if ndc.y > +1 do return // Y+ PLANE REJECTION
-        if ndc.y < -1 do return // Y- PLANE REJECTION
+        // Case 3 (no clipping, emit 0 triangle)
+        // --------- near
+        //     +
+        //    + +
+        //   +   +
+        //  +-----+
+
+        clip: sa.Small_Array(3, int)
+
+        // Determine clipping violations.
+        for v, i in triangle.positions {
+
+            // if v.x < -1 do return
+            // if v.x > +1 do return
+            // if v.y > +1 do return
+            // if v.y > +1 do return
+
+            if v.z < 0 {     // z still view-space here
+                sa.append(&clip, i)
+                return
+            }
+
+            min_z = min(min_z, v.z)
+            max_z = max(max_z, v.z)
+        }
+
+        switch sa.len(clip) {
+        // No clipping. All points are in front of the plane.
+        case 0: sa.append(&triangles, triangle)
+        // One point behind the plane.
+        case 1:
+            f_index_0 := sa.get(clip, 0)
+            n_index_0 := (f_index_0 + 1) % 3
+            n_index_1 := (f_index_0 + 2) % 3
+
+            f_v_0 := triangle.positions[f_index_0]
+            n_v_0 := triangle.positions[n_index_0]
+            n_v_1 := triangle.positions[n_index_1]
+
+            t_0 := inverse_lerp(n_v_0.z, f_v_0.z, 0)
+            t_1 := inverse_lerp(n_v_1.z, f_v_0.z, 0)
+        // Two points behind the plane.
+        case 2:
+            f_index_0 := sa.get(clip, 0)
+            f_index_1 := sa.get(clip, 1)
+            n_index_0 := (f_index_1 + 1) % 3
+
+            f_v_0 := triangle.positions[f_index_0]
+            f_v_1 := triangle.positions[f_index_1]
+            n_v_0 := triangle.positions[n_index_0]
+
+            t_0 := inverse_lerp(n_v_0.z, f_v_0.z, 0)
+            t_1 := inverse_lerp(n_v_0.z, f_v_1.z, 0)
+        }
     }
 
-    // 0 triangles (3 verts behind)
-    // 1 triangles (3 verts in front OR 2 verts behind)
-    // 2 triangles (2 verts in front)
+    for &triangle in sa.slice(&triangles) {
 
-    // parts := clip_triangle(a_ndc, b_ndc, c_ndc)
-    // for a, b, c in parts {
+        // Map the triangle to the viewport (NDC -> Viewport).
+        for &pos in triangle.positions {
+            pos = map_to_viewport(pos)
+        }
 
-    // Map XY to Viewport
-    for &gl_Position in tri_ndc {
-        gl_Position = map_to_viewport(gl_Position)
+        // Find triangle bounds...
+        triangle_min := la.array_cast(
+            la.floor(la.min(triangle.positions[0].xy, triangle.positions[1].xy, triangle.positions[2].xy)),
+            int,
+        )
+        triangle_max := la.array_cast(
+            la.ceil(la.max(triangle.positions[0].xy, triangle.positions[1].xy, triangle.positions[2].xy)),
+            int,
+        )
+
+        // ... clamp to screen.
+        triangle_min = la.clamp(triangle_min, 0, screen.size)
+        triangle_max = la.clamp(triangle_max, 0, screen.size)
+
+        // Render the triangle!
+        if toggles.use_simd {
+            rasterize_triangle_simd(triangle, triangle_min, triangle_max, image)
+        } else {
+            rasterize_triangle(triangle, triangle_min, triangle_max, image)
+        }
     }
 
-    // Find triangle bounds...
-    triangle_min := linalg.array_cast(linalg.floor(linalg.min(tri_ndc[0].xy, tri_ndc[1].xy, tri_ndc[2].xy)), int)
-    triangle_max := linalg.array_cast(linalg.ceil(linalg.max(tri_ndc[0].xy, tri_ndc[1].xy, tri_ndc[2].xy)), int)
+    transform_vertex :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
 
-    // ... clamp to screen.
-    triangle_min = linalg.clamp(triangle_min, 0, screen.size)
-    triangle_max = linalg.clamp(triangle_max, 0, screen.size)
+        // ---- VERTEX SHADER ----
+        ndc := transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
 
-    // TILE_SIZE :: 64 // power-of-2 and multiple of 16?
+        // ---- HOMOGENIZE COORDINATES ----
+        ndc.w = 1.0 / ndc.w
+        ndc.xy *= ndc.w
 
-    // x_min := mem.align_backward_int(triangle_min.x, TILE_SIZE)
-    // y_min := mem.align_backward_int(triangle_min.y, TILE_SIZE)
-    // x_max := mem.align_forward_int(triangle_max.x, TILE_SIZE)
-    // y_max := mem.align_forward_int(triangle_max.y, TILE_SIZE)
-
-    // for y := y_min; y < y_max; y += TILE_SIZE {
-    //     for x := x_min; x < x_max; x += TILE_SIZE {
-
-    //         tile_min := [2]int{x, y}
-    //         tile_max := linalg.min(tile_min + (TILE_SIZE - 1), screen.size)
-
-    // ...clamped to screen.
-    v_min := triangle_min // linalg.clamp(triangle_min, tile_min, tile_max)
-    v_max := triangle_max // linalg.clamp(triangle_max, tile_min, tile_max)
-
-    // Render the triangle!
-    if toggles.use_simd {
-        rasterize_triangle_simd(tri_ndc[0], tri_ndc[1], tri_ndc[2], a, b, c, v_min, v_max, image)
-    } else {
-        rasterize_triangle(tri_ndc[0], tri_ndc[1], tri_ndc[2], a, b, c, v_min, v_max, image)
+        return ndc
     }
 
-    //     }
-    // }
-
-    // }
+    // Determines if the triangle is front facing (counter-clockwise winding).
+    is_frontface :: proc(tri: Triangle) -> bool {
+        // Positive area indicates counter-clockwise winding.
+        return signed_area(tri.positions[0].xy, tri.positions[1].xy, tri.positions[2].xy) > 0
+    }
 
     map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
 
@@ -234,27 +312,21 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
         pos.x *= cast(f32)screen.size.x
         pos.y *= cast(f32)screen.size.y
 
-        return {pos.x, pos.y, ndc.z, ndc.w}
-    }
-
-    world_to_ndc :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
-        return transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
+        return {pos.x, pos.y, ndc.z * ndc.w, ndc.w}
     }
 }
 
 @(private = "file")
-rasterize_triangle :: proc(
-    v0, v1, v2: Vector4,
-    a, b, c: Vertex,
-    triangle_min, triangle_max: [2]int,
-    image: Image,
-) #no_bounds_check {
+rasterize_triangle :: proc(triangle: Triangle, triangle_min, triangle_max: [2]int, image: Image) #no_bounds_check {
+
+    v0, v1, v2 := expand_values(triangle.positions)
+    a, b, c := expand_values(triangle.vertices)
 
     // Precompuse inverse area to optimize interpolation.
     inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
 
     // Barycentric interpolation starting points.
-    v_min := linalg.array_cast(triangle_min.xy, f32)
+    v_min := la.array_cast(triangle_min.xy, f32)
     weights_row: [3]f32 = {
         signed_area(v1.xy, v2.xy, v_min),
         signed_area(v2.xy, v0.xy, v_min),
@@ -280,19 +352,17 @@ rasterize_triangle :: proc(
                 continue // fragment outside triangle
             }
 
-            frag_w := interpolate(v0.w, v1.w, v2.w, weights)
-            frag_z := interpolate(v0.z, v1.z, v2.z, weights) * frag_w
-
             // ---- DEPTH TEST ----
 
             depth_ptr := raw_data(screen_depth)[(y * screen.size.x) + x:]
+            frag_z := interpolate(v0.z, v1.z, v2.z, weights)
 
-            if frag_z < depth_ptr[0] {
+            if frag_z > depth_ptr[0] {
                 continue // fragment hidden
             }
 
             // Perspective correct interpolation weights.
-            perspective := (weights * {v0.w, v1.w, v2.w}) / frag_w
+            perspective := (weights * {v0.w, v1.w, v2.w}) / interpolate(v0.w, v1.w, v2.w, weights)
 
             // ---- COMPUTE VARYING (INTERPOLATED) ATTRIBUTES ---
 
@@ -303,7 +373,7 @@ rasterize_triangle :: proc(
 
             pixel := image_sample(image, fragment_uv)
 
-            brightness := max(0.0, linalg.dot(fragment_normal, Sun_Direction))
+            brightness := max(0.0, la.dot(fragment_normal, Sun_Direction))
             pixel = mix_color(0, pixel, 0.25 + (brightness * 0.75))
 
             // ---- FRAGMENT SHADER END ---
@@ -325,11 +395,13 @@ rasterize_triangle :: proc(
 
 @(private = "file")
 rasterize_triangle_simd :: proc(
-    v0, v1, v2: Vector4,
-    a, b, c: Vertex,
+    triangle: Triangle,
     triangle_min, triangle_max: [2]int,
     image: Image,
 ) #no_bounds_check {
+
+    v0, v1, v2 := expand_values(triangle.positions)
+    a, b, c := expand_values(triangle.vertices)
 
     STEP_SIZES :: (#simd[4]f32){0, 1, 2, 3}
 
@@ -343,7 +415,7 @@ rasterize_triangle_simd :: proc(
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
     align_offset := cast(f32)(align_min_x - triangle_min.x)
 
-    v_min := linalg.array_cast(triangle_min.xy, f32)
+    v_min := la.array_cast(triangle_min.xy, f32)
 
     // Barycentric interpolation starting points.
     weights_row_0 := signed_area(v1.xy, v2.xy, v_min)
@@ -387,22 +459,21 @@ rasterize_triangle_simd :: proc(
                 continue // all fragments outside triangle
             }
 
-            frag_w := interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
-            frag_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2) * frag_w
-
             // ---- DEPTH TEST ----
 
             depth_ptr := cast(^#simd[4]f32)raw_data(screen_depth)[(y * screen.size.x) + x:]
+            frag_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
 
-            write_mask = write_mask & simd.lanes_gt(frag_z, depth_ptr^)
+            write_mask = write_mask & simd.lanes_lt(frag_z, depth_ptr^)
             if simd.reduce_or(write_mask) == 0 {
                 continue // all fragments are hidden
             }
 
             // Perspective correct interpolation weights.
-            w0 = (w0 * v0.w) / frag_w
-            w1 = (w1 * v1.w) / frag_w
-            w2 = (w2 * v2.w) / frag_w
+            w_factor := 1.0 / interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
+            w0 = (w0 * v0.w) * w_factor
+            w1 = (w1 * v1.w) * w_factor
+            w2 = (w2 * v2.w) * w_factor
 
             // ---- COMPUTE VARYING (INTERPOLATED) ATTRIBUTES ---
 
@@ -472,7 +543,12 @@ signed_area :: #force_inline proc(a, b, c: [2]$V) -> V {
 }
 
 @(private = "file")
+inverse_lerp :: proc(a, b, v: f32) -> f32 {
+    return (v - a) / (b - a)
+}
+
+@(private = "file")
 Triangle :: struct {
-    device_coordinates: [4]Vector4,
-    vertices:           [3]Vertex,
+    positions: [3]Vector4,
+    vertices:  [3]Vertex,
 }
