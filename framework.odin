@@ -51,8 +51,18 @@ quit :: proc() {
     ray.CloseWindow()
 }
 
+// Seconds
 get_time :: proc() -> f32 {
     return cast(f32)ray.GetTime()
+}
+
+// Seconds
+get_delta_time :: proc() -> f32 {
+    return ray.GetFrameTime()
+}
+
+get_window_size :: proc() -> [2]int {
+    return {cast(int)ray.GetScreenWidth(), cast(int)ray.GetScreenHeight()}
 }
 
 update_screen_pixels :: proc(info: string) {
@@ -90,10 +100,6 @@ Vector2 :: [2]f32
 Vector3 :: [3]f32
 Vector4 :: [4]f32
 
-Vector2i :: [2]i32
-Vector3i :: [3]i32
-Vector4i :: [4]i32
-
 Matrix :: matrix[4, 4]f32
 
 // ----
@@ -128,6 +134,11 @@ Mouse_Button :: distinct ray.MouseButton
 // Gets the current mouse position.
 mouse_position :: proc() -> Vector2 {
     return ray.GetMousePosition()
+}
+
+// Sets the current mouse position.
+set_mouse_position :: proc(position: [2]int) {
+    ray.SetMousePosition(auto_cast position.x, auto_cast position.y)
 }
 
 // Gets the mouse delta position (difference since last frame).

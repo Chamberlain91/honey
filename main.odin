@@ -11,8 +11,7 @@ import "core:slice"
 
 Sun_Direction := la.normalize(Vector3{1, 3, -2})
 
-latest_time: f32
-time: f32
+triangle_count: int
 
 main :: proc() {
 
@@ -26,34 +25,50 @@ main :: proc() {
     // ...
     mesh := parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
 
+    // 3------2
+    // |\     |
+    // | \    |
+    // |  \   |
+    // |   \  |
+    // |    \ |
+    // |     \|
+    // 0------1
+
     quad: Mesh(Vertex) = {
         vertices = {
             Vertex{position = {-30, 0, -30}, uv = {0, 0}, normal = {0, 1, 0}, color = 1.0},
-            Vertex{position = {-30, 0, +30}, uv = {0, 1}, normal = {0, 1, 0}, color = 1.0},
+            Vertex{position = {+30, 0, -30}, uv = {0, 1}, normal = {0, 1, 0}, color = 1.0},
             Vertex{position = {+30, 0, +30}, uv = {1, 1}, normal = {0, 1, 0}, color = 1.0},
-            Vertex{position = {+30, 0, -30}, uv = {1, 0}, normal = {0, 1, 0}, color = 1.0},
+            Vertex{position = {-30, 0, +30}, uv = {1, 0}, normal = {0, 1, 0}, color = 1.0},
         },
-        indices  = {0, 2, 1, 0, 3, 2},
+        indices  = {0, 1, 2, 0, 2, 3},
     }
+
+    camera_position: Vector3
+    camera_heading: f32
+    camera_pitch: f32
+
+    camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
 
     // Main loop.
     main_loop: for is_window_open() {
+
+        defer set_mouse_position(get_window_size() / 2)
 
         // Populate image data for this frame.
         image_clear(screen, transmute(Color)(u32(0xFF181818))) // clear color
         slice.fill(screen_depth, 1.0) // clear depth
 
-        time += toggles.pause ? 0 : get_time() - latest_time
-        latest_time = get_time()
+        camera_dir: Vector3 = {
+            math.cos(camera_heading) * math.cos(camera_pitch),
+            math.sin(camera_pitch),
+            math.sin(camera_heading) * math.cos(camera_pitch),
+        }
 
-        camera_position := Vector3{math.cos_f32(time / 3), 1.5, math.sin_f32(time / 5)} * 5
-        camera_aspect := cast(f32)screen.size.x / cast(f32)screen.size.y
         camera_matrix :=
             la.matrix4_perspective_f32(math.PI / 2, camera_aspect, 0.1, 50.0) *
-            la.matrix4_look_at_f32(camera_position, {0, 7.0, 0}, {0, 1, 0})
+            la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
-        min_z = max(f32)
-        max_z = min(f32)
 
         for y: f32 = -15; y <= 15; y += 5.0 {
             for x: f32 = -15; x <= 15; x += 5.0 {
@@ -63,38 +78,42 @@ main :: proc() {
         }
         render_mesh(quad, assets.image, camera_matrix)
 
-        min_depth, max_depth, _ := slice.min_max(screen_depth)
-
         status := fmt.tprintf(
-            "(Q) pause: {}\n(E) backface: {}\n(Z) use simd: {}\ndepth range: {:0.4f} to {:0.4f}\nz range: {:0.4f} to {:0.4f}",
-            toggles.pause,
+            "(X) backface: {}\n(Z) use simd: {}\ntriangle count: {}",
             toggles.backface,
             toggles.use_simd,
-            min_depth,
-            max_depth,
-            min_z,
-            max_z,
+            triangle_count,
         )
         update_screen_pixels(status)
+        triangle_count = 0
+
+        PITCH_LIMIT :: (math.PI / 2) * 0.8
+
+        camera_heading += mouse_delta().x * 0.01
+        camera_pitch -= mouse_delta().y * 0.01
+        camera_pitch = clamp(camera_pitch, -PITCH_LIMIT, PITCH_LIMIT)
+
+        if is_key_down(.W) {
+            camera_position += camera_dir * get_delta_time() * 5
+        }
+
+        if is_key_down(.S) {
+            camera_position -= camera_dir * get_delta_time() * 5
+        }
 
         // Exit when pressing escape.
         if is_key_pressed(.ESCAPE) {
             break main_loop
         }
 
-        // Pause
-        if is_key_pressed(.Q) {
-            toggles.pause = !toggles.pause
-        }
-
-        // Backface culling
-        if is_key_pressed(.E) {
-            toggles.backface = !toggles.backface
-        }
-
         // Toggle SIMD code paths.
         if is_key_pressed(.Z) {
             toggles.use_simd = !toggles.use_simd
+        }
+
+        // Backface culling
+        if is_key_pressed(.X) {
+            toggles.backface = !toggles.backface
         }
     }
 }
@@ -110,11 +129,9 @@ assets: struct {
 toggles: struct {
     use_simd: bool,
     backface: bool,
-    pause:    bool,
 } = {
     use_simd = true,
     backface = true,
-    pause    = true,
 }
 
 // -----------------------------------------------------------------------------
@@ -131,9 +148,6 @@ Mesh :: struct($TVertex: typeid) {
     indices:  []int,
 }
 
-// FOR NOW
-vertices: [dynamic]Vertex
-
 render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
 
     for i := 0; i < len(mesh.indices); i += 3 {
@@ -146,9 +160,12 @@ render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
     }
 }
 
-min_z, max_z: f32
+render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
 
-render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
+    Triangle_Buffer :: sa.Small_Array(3, Triangle)
+
+    @(thread_local)
+    triangles: Triangle_Buffer
 
     // Reference:
     // - https://github.com/kristoffer-dyrkorn/triangle-rasterizer/blob/main/9/triangle.js
@@ -156,125 +173,98 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
     // - https://jtsorlinis.github.io/rendering-tutorial/
     // - https://github.com/gustavopezzi/triangle-rasterizer-int
 
-    @(thread_local)
-    triangles: sa.Small_Array(16, Triangle)
+    // Case 0 (no clipping, emit 1 triangle)
+    //     +
+    //    + +
+    //   +   +
+    //  +-----+
+    // --------- near
 
+    // Case 1 (emit 2 triangles)
+    // +-------+
+    //  +     +
+    //   +---+ near
+    //    + +
+    //     +
+
+    // Case 2 (emit 1 triangle)
+    //     +
+    //    + +
+    //   +---+ near
+    //  +     +
+    // +-------+
+
+    // Case 3 (no clipping, emit 0 triangle)
+    // --------- near
+    //     +
+    //    + +
+    //   +   +
+    //  +-----+
+
+    // World -> Clip
+    p0 := transform_vertex(v0, transform)
+    p1 := transform_vertex(v1, transform)
+    p2 := transform_vertex(v2, transform)
+
+    // Reject the triangle if it is completely out of view.
+    if p0.x > +p0.w && p1.x > +p1.w && p2.x > +p2.w do return
+    if p0.x < -p0.w && p1.x < -p1.w && p2.x < -p2.w do return
+    if p0.y > +p0.w && p1.y > +p1.w && p2.y > +p2.w do return
+    if p0.y < -p0.w && p1.y < -p1.w && p2.y < -p2.w do return
+    if p0.z > +p0.w && p1.z > +p1.w && p2.z > +p2.w do return
+    if p0.z < 0 && p1.z < 0 && p2.z < 0 do return
+
+    // Clip the triangle if it intercepts the near z-plane.
+    // This will generate 1 or 2 triangles to render.
     sa.clear(&triangles)
-    sa.append(
-        &triangles,
-        Triangle {
-            positions = {
-                // World -> NDC as (x, y, z, 1/w)
-                transform_vertex(a, transform),
-                transform_vertex(b, transform),
-                transform_vertex(c, transform),
-            },
-            vertices  = {a, b, c},
-        },
-    )
 
-    // Backface culling.
-    if toggles.backface && !is_frontface(sa.get(triangles, 0)) {
-        return
+    if p0.z < 0 {
+        if p1.z < 0 {
+            clip2({{p0, p1, p2}, {v0, v1, v2}}, &triangles)
+        } else if p2.z < 0 {
+            clip2({{p0, p2, p1}, {v0, v2, v1}}, &triangles)
+        } else {
+            clip1({{p0, p1, p2}, {v0, v1, v2}}, &triangles)
+        }
+    } else if p1.z < 0 {
+        if p2.z < 0 {
+            clip2({{p1, p2, p0}, {v1, v2, v0}}, &triangles)
+        } else {
+            clip1({{p1, p0, p2}, {v1, v0, v2}}, &triangles)
+        }
+    } else if p2.z < 0 {
+        clip1({{p2, p0, p1}, {v2, v0, v1}}, &triangles)
+    } else {
+        // No clipping needed
+        sa.append(&triangles, Triangle{{p0, p1, p2}, {v0, v1, v2}})
     }
 
-    // TODO: Clipping planes.
-    {
-        triangle := sa.pop_back(&triangles)
-
-        // Case 0 (no clipping, emit 1 triangle)
-        //     +
-        //    + +
-        //   +   +
-        //  +-----+
-        // --------- near
-
-        // Case 1 (emit 2 triangles)
-        // +-------+
-        //  +     +
-        //   +---+ near
-        //    + +
-        //     +
-
-        // Case 2 (emit 1 triangle)
-        //     +
-        //    + +
-        //   +---+ near
-        //  +     +
-        // +-------+
-
-        // Case 3 (no clipping, emit 0 triangle)
-        // --------- near
-        //     +
-        //    + +
-        //   +   +
-        //  +-----+
-
-        clip: sa.Small_Array(3, int)
-
-        // Determine clipping violations.
-        for v, i in triangle.positions {
-
-            // if v.x < -1 do return
-            // if v.x > +1 do return
-            // if v.y > +1 do return
-            // if v.y > +1 do return
-
-            if v.z < 0 {     // z still view-space here
-                sa.append(&clip, i)
-                return
-            }
-
-            min_z = min(min_z, v.z)
-            max_z = max(max_z, v.z)
-        }
-
-        switch sa.len(clip) {
-        // No clipping. All points are in front of the plane.
-        case 0: sa.append(&triangles, triangle)
-        // One point behind the plane.
-        case 1:
-            f_index_0 := sa.get(clip, 0)
-            n_index_0 := (f_index_0 + 1) % 3
-            n_index_1 := (f_index_0 + 2) % 3
-
-            f_v_0 := triangle.positions[f_index_0]
-            n_v_0 := triangle.positions[n_index_0]
-            n_v_1 := triangle.positions[n_index_1]
-
-            t_0 := inverse_lerp(n_v_0.z, f_v_0.z, 0)
-            t_1 := inverse_lerp(n_v_1.z, f_v_0.z, 0)
-        // Two points behind the plane.
-        case 2:
-            f_index_0 := sa.get(clip, 0)
-            f_index_1 := sa.get(clip, 1)
-            n_index_0 := (f_index_1 + 1) % 3
-
-            f_v_0 := triangle.positions[f_index_0]
-            f_v_1 := triangle.positions[f_index_1]
-            n_v_0 := triangle.positions[n_index_0]
-
-            t_0 := inverse_lerp(n_v_0.z, f_v_0.z, 0)
-            t_1 := inverse_lerp(n_v_0.z, f_v_1.z, 0)
-        }
-    }
-
+    // Draw each triangle.
     for &triangle in sa.slice(&triangles) {
 
         // Map the triangle to the viewport (NDC -> Viewport).
         for &pos in triangle.positions {
-            pos = map_to_viewport(pos)
+
+            // Do the "perspective divide"
+            pos.xyz /= pos.w
+            pos.w = 1.0 / pos.w
+
+            // NDC -> Viewport
+            pos.xy = (pos.xy + 1.0) / 2.0
+            pos.x *= cast(f32)screen.size.x
+            pos.y *= cast(f32)screen.size.y
+        }
+
+        p0, p1, p2 = expand_values(triangle.positions)
+
+        // Backface culling. Negative area indicates clockwise winding.
+        if toggles.backface && signed_area(p0.xy, p1.xy, p2.xy) < 0 {
+            continue
         }
 
         // Find triangle bounds...
-        triangle_min := la.array_cast(
-            la.floor(la.min(triangle.positions[0].xy, triangle.positions[1].xy, triangle.positions[2].xy)),
-            int,
-        )
-        triangle_max := la.array_cast(
-            la.ceil(la.max(triangle.positions[0].xy, triangle.positions[1].xy, triangle.positions[2].xy)),
-            int,
-        )
+        triangle_min := la.array_cast(la.floor(la.min(p0.xy, p1.xy, p2.xy)), int)
+        triangle_max := la.array_cast(la.ceil(la.max(p0.xy, p1.xy, p2.xy)), int)
 
         // ... clamp to screen.
         triangle_min = la.clamp(triangle_min, 0, screen.size)
@@ -288,31 +278,54 @@ render_triangle :: proc(a, b, c: Vertex, image: Image, transform: Matrix) {
         }
     }
 
-    transform_vertex :: proc(vertex: Vertex, transform: Matrix) -> Vector4 {
+    // Count the number of triangles drawn.
+    triangle_count += sa.len(triangles)
 
-        // ---- VERTEX SHADER ----
-        ndc := transform * Vector4{vertex.position.x, vertex.position.y, vertex.position.z, 1.0}
-
-        // ---- HOMOGENIZE COORDINATES ----
-        ndc.w = 1.0 / ndc.w
-        ndc.xy *= ndc.w
-
-        return ndc
+    transform_vertex :: proc(vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
+        clip_position.xyz = vertex.position
+        clip_position.w = 1.0
+        return transform * clip_position
     }
 
-    // Determines if the triangle is front facing (counter-clockwise winding).
-    is_frontface :: proc(tri: Triangle) -> bool {
-        // Positive area indicates counter-clockwise winding.
-        return signed_area(tri.positions[0].xy, tri.positions[1].xy, tri.positions[2].xy) > 0
+    clip1 :: proc(triangle: Triangle, output: ^Triangle_Buffer) {
+        p0, p1, p2 := expand_values(triangle.positions) // assume 0 and 1 violates
+        v0, v1, v2 := expand_values(triangle.vertices)
+
+        alphaA := -p0.z / (p1.z - p0.z)
+        alphaB := -p0.z / (p2.z - p0.z)
+
+        pA := la.lerp(p0, p1, alphaA)
+        pB := la.lerp(p0, p2, alphaB)
+
+        vA := interpolate_vertex(v0, v1, alphaA)
+        vB := interpolate_vertex(v0, v2, alphaB)
+
+        sa.append(output, Triangle{{pA, p1, p2}, {vA, v1, v2}})
+        sa.append(output, Triangle{{pB, pA, p2}, {vB, vA, v2}})
     }
 
-    map_to_viewport :: proc(ndc: Vector4) -> Vector4 {
+    clip2 :: proc(triangle: Triangle, output: ^Triangle_Buffer) {
+        p0, p1, p2 := expand_values(triangle.positions) // assume 0 violates
+        v0, v1, v2 := expand_values(triangle.vertices)
 
-        pos := (Vector2{ndc.x, ndc.y} + 1.0) / 2.0
-        pos.x *= cast(f32)screen.size.x
-        pos.y *= cast(f32)screen.size.y
+        alpha0 := -p0.z / (p2.z - p0.z)
+        alpha1 := -p1.z / (p2.z - p1.z)
 
-        return {pos.x, pos.y, ndc.z * ndc.w, ndc.w}
+        p0 = la.lerp(p0, p2, alpha0)
+        p1 = la.lerp(p1, p2, alpha1)
+
+        v0 = interpolate_vertex(v0, v2, alpha0)
+        v1 = interpolate_vertex(v1, v2, alpha1)
+
+        sa.append(output, Triangle{{p0, p1, p2}, {v0, v1, v2}})
+    }
+
+    interpolate_vertex :: proc(a, b: Vertex, t: f32) -> (c: Vertex) {
+        c.color = la.lerp(a.color, b.color, t)
+        c.normal = la.lerp(a.normal, b.normal, t)
+        c.position = la.lerp(a.position, b.position, t)
+        c.uv = la.lerp(a.uv, b.uv, t)
+        return
     }
 }
 
@@ -538,13 +551,8 @@ rasterize_triangle_simd :: proc(
 }
 
 @(private = "file")
-signed_area :: #force_inline proc(a, b, c: [2]$V) -> V {
+signed_area :: #force_inline proc(a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-}
-
-@(private = "file")
-inverse_lerp :: proc(a, b, v: f32) -> f32 {
-    return (v - a) / (b - a)
 }
 
 @(private = "file")
