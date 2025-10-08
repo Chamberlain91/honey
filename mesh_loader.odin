@@ -120,9 +120,9 @@ parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv :=
                 n2 := (f2.normal_index >= 0) ? normals[f2.normal_index] : {}
 
                 verts := [3]Vertex {
-                    {position = p0, normal = n0, uv = u0, color = {1.0, 1.0, 1.0, 1.0}},
-                    {position = p1, normal = n1, uv = u1, color = {1.0, 1.0, 1.0, 1.0}},
-                    {position = p2, normal = n2, uv = u2, color = {1.0, 1.0, 1.0, 1.0}},
+                    {position = p0, normal = n0, uv = u0},
+                    {position = p1, normal = n1, uv = u1},
+                    {position = p2, normal = n2, uv = u2},
                 }
 
                 for vertex in verts {

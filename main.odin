@@ -27,10 +27,10 @@ main :: proc() {
 
     quad: Mesh = {
         vertices = {
-            Vertex{position = {-30, 0, -30}, uv = {0, 0}, normal = {0, 1, 0}, color = 1.0},
-            Vertex{position = {+30, 0, -30}, uv = {0, 1}, normal = {0, 1, 0}, color = 1.0},
-            Vertex{position = {+30, 0, +30}, uv = {1, 1}, normal = {0, 1, 0}, color = 1.0},
-            Vertex{position = {-30, 0, +30}, uv = {1, 0}, normal = {0, 1, 0}, color = 1.0},
+            Vertex{position = {-30, 0, -30}, uv = {0, 0}, normal = {0, 1, 0}},
+            Vertex{position = {+30, 0, -30}, uv = {0, 1}, normal = {0, 1, 0}},
+            Vertex{position = {+30, 0, +30}, uv = {1, 1}, normal = {0, 1, 0}},
+            Vertex{position = {-30, 0, +30}, uv = {1, 0}, normal = {0, 1, 0}},
         },
         indices  = {0, 1, 2, 0, 2, 3},
     }
@@ -131,7 +131,6 @@ Vertex :: struct {
     position: Vector3,
     normal:   Vector3,
     uv:       Vector2,
-    color:    Vector4,
 }
 
 Mesh :: struct {
@@ -312,7 +311,6 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
     }
 
     interpolate_vertex :: proc(a, b: Vertex, t: f32) -> (c: Vertex) {
-        c.color = la.lerp(a.color, b.color, t)
         c.normal = la.lerp(a.normal, b.normal, t)
         c.position = la.lerp(a.position, b.position, t)
         c.uv = la.lerp(a.uv, b.uv, t)
