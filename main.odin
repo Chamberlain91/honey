@@ -111,7 +111,7 @@ main :: proc() {
 
 SCREEN_W :: 960
 SCREEN_H :: 540
-FACTOR :: 1
+FACTOR :: 1.5
 
 assets: struct {
     image: Image,
@@ -151,17 +151,6 @@ render_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) #no_bounds_chec
 }
 
 render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
-
-    Triangle_Buffer :: sa.Small_Array(3, Triangle)
-
-    @(thread_local)
-    triangles: Triangle_Buffer
-
-    // Reference:
-    // - https://github.com/kristoffer-dyrkorn/triangle-rasterizer/blob/main/9/triangle.js
-    // - https://fgiesen.wordpress.com/2013/02/10/optimizing-the-basic-rasterizer/
-    // - https://jtsorlinis.github.io/rendering-tutorial/
-    // - https://github.com/gustavopezzi/triangle-rasterizer-int
 
     // World -> Clip
     p0 := transform_vertex(v0, transform)
@@ -211,7 +200,9 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
 
     // Clip the triangle if it intercepts the near z-plane.
     // This will generate 1 or 2 triangles to render.
-    sa.clear(&triangles)
+    // Other clipping planes are handled by raster clipping.
+    Triangle_Buffer :: sa.Small_Array(3, Triangle)
+    triangles: Triangle_Buffer
 
     if p0.z < 0 {
         if p1.z < 0 {
@@ -256,7 +247,7 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
         triangle_min := la.array_cast(la.floor(la.min(p0.xy, p1.xy, p2.xy)), int)
         triangle_max := la.array_cast(la.ceil(la.max(p0.xy, p1.xy, p2.xy)), int)
 
-        // ... clamp to screen.
+        // ... clamp to screen (x and y clip planes)
         triangle_min = la.clamp(triangle_min, 0, screen.size)
         triangle_max = la.clamp(triangle_max, 0, screen.size)
 
@@ -311,8 +302,8 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
     }
 
     interpolate_vertex :: proc(a, b: Vertex, t: f32) -> (c: Vertex) {
+        c.position = la.lerp(a.position, b.position, t) // Not used as a interpolated value (can remove?)
         c.normal = la.lerp(a.normal, b.normal, t)
-        c.position = la.lerp(a.position, b.position, t)
         c.uv = la.lerp(a.uv, b.uv, t)
         return
     }
@@ -508,10 +499,6 @@ rasterize_triangle_simd :: proc(
             depth_ptr^ = transmute(#simd[4]f32)((transmute(#simd[4]u32)frag_z & write_mask) |
                 (transmute(#simd[4]u32)(depth_ptr^) &~ write_mask))
         }
-    }
-
-    edge :: #force_inline proc(a, ab: Vector2, cx, cy: #simd[4]f32) -> #simd[4]f32 {
-        return ((a.y - cy) * ab.x) - ((a.x - cx) * ab.y)
     }
 
     interpolate :: proc(a, b, c, w0, w1, w2: #simd[4]f32) -> #simd[4]f32 {
