@@ -139,7 +139,7 @@ Mesh :: struct {
     indices:  []int,
 }
 
-render_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) {
+render_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) #no_bounds_check {
 
     for i := 0; i < len(mesh.indices); i += 3 {
 

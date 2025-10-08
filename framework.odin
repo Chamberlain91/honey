@@ -208,11 +208,7 @@ image_load :: proc(path: string) -> Image {
 }
 
 image_clear :: proc(image: Image, color: Color) {
-    for y in 0 ..< image.size.y {
-        for x in 0 ..< image.size.x {
-            image_set_pixel(image, x, y, color)
-        }
-    }
+    slice.fill(image.data, color)
 }
 
 image_set_pixel :: #force_inline proc(image: Image, x, y: int, color: Color) #no_bounds_check {
