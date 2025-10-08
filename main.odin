@@ -25,16 +25,7 @@ main :: proc() {
     // ...
     mesh := parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
 
-    // 3------2
-    // |\     |
-    // | \    |
-    // |  \   |
-    // |   \  |
-    // |    \ |
-    // |     \|
-    // 0------1
-
-    quad: Mesh(Vertex) = {
+    quad: Mesh = {
         vertices = {
             Vertex{position = {-30, 0, -30}, uv = {0, 0}, normal = {0, 1, 0}, color = 1.0},
             Vertex{position = {+30, 0, -30}, uv = {0, 1}, normal = {0, 1, 0}, color = 1.0},
@@ -118,9 +109,9 @@ main :: proc() {
     }
 }
 
-SCREEN_W :: 800
-SCREEN_H :: 500
-FACTOR :: 2
+SCREEN_W :: 960
+SCREEN_H :: 540
+FACTOR :: 1
 
 assets: struct {
     image: Image,
@@ -143,12 +134,12 @@ Vertex :: struct {
     color:    Vector4,
 }
 
-Mesh :: struct($TVertex: typeid) {
-    vertices: []TVertex,
+Mesh :: struct {
+    vertices: []Vertex,
     indices:  []int,
 }
 
-render_mesh :: proc(mesh: Mesh(Vertex), image: Image, transform: Matrix) {
+render_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) {
 
     for i := 0; i < len(mesh.indices); i += 3 {
 
@@ -172,6 +163,16 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
     // - https://fgiesen.wordpress.com/2013/02/10/optimizing-the-basic-rasterizer/
     // - https://jtsorlinis.github.io/rendering-tutorial/
     // - https://github.com/gustavopezzi/triangle-rasterizer-int
+
+    // World -> Clip
+    p0 := transform_vertex(v0, transform)
+    p1 := transform_vertex(v1, transform)
+    p2 := transform_vertex(v2, transform)
+
+    // Backface culling. Compare normal to "view vector", negative indicates away from viewpoint.
+    if toggles.backface && la.dot(la.cross(p1.xyz - p0.xyz, p2.xyz - p0.xyz), p0.xyz) < 0 {
+        return
+    }
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -200,11 +201,6 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
     //    + +
     //   +   +
     //  +-----+
-
-    // World -> Clip
-    p0 := transform_vertex(v0, transform)
-    p1 := transform_vertex(v1, transform)
-    p2 := transform_vertex(v2, transform)
 
     // Reject the triangle if it is completely out of view.
     if p0.x > +p0.w && p1.x > +p1.w && p2.x > +p2.w do return
@@ -246,8 +242,8 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
         for &pos in triangle.positions {
 
             // Do the "perspective divide"
-            pos.xyz /= pos.w
             pos.w = 1.0 / pos.w
+            pos.xyz *= pos.w
 
             // NDC -> Viewport
             pos.xy = (pos.xy + 1.0) / 2.0
@@ -256,11 +252,6 @@ render_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) {
         }
 
         p0, p1, p2 = expand_values(triangle.positions)
-
-        // Backface culling. Negative area indicates clockwise winding.
-        if toggles.backface && signed_area(p0.xy, p1.xy, p2.xy) < 0 {
-            continue
-        }
 
         // Find triangle bounds...
         triangle_min := la.array_cast(la.floor(la.min(p0.xy, p1.xy, p2.xy)), int)

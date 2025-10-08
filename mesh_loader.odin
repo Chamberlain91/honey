@@ -6,7 +6,7 @@ import "core:math/linalg"
 import "core:strconv"
 import "core:strings"
 
-parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv := false) -> Mesh(Vertex) {
+parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv := false) -> Mesh {
 
     vertices: [dynamic]Vertex
     indices: [dynamic]int
@@ -141,7 +141,7 @@ parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv :=
     fmt.printfln("Loaded wavefront model: vertices {}, indicies {}", len(vertices), len(indices))
     fmt.printfln("- Bounds: {:0.2f} to {:0.2f}", pos_min, pos_max)
 
-    mesh := Mesh(Vertex) {
+    mesh := Mesh {
         vertices = vertices[:],
         indices  = indices[:],
     }
