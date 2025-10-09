@@ -1,11 +1,11 @@
 package honey
 
 import sa "core:container/small_array"
-import "core:fmt"
-import "core:math/linalg"
 import "core:strconv"
 import "core:strings"
 
+// Parse a Wavefront `*.obj` model format. This is rudementary!
+// This does not consider `*.mtl` files nor submeshes, smoothing groups, or other features.
 parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv := false) -> Mesh {
 
     vertices: [dynamic]Vertex
@@ -29,8 +29,6 @@ parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv :=
         normal_index:   int,
     }
 
-    pos_min, pos_max := Vector3(max(f32)), Vector3(min(f32))
-
     text_it := text
     for line in strings.split_lines_iterator(&text_it) {
 
@@ -51,11 +49,6 @@ parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv :=
             x := strconv.parse_f32(parts[1]) or_else 0
             y := strconv.parse_f32(parts[2]) or_else 0
             z := strconv.parse_f32(parts[3]) or_else 0
-
-            v := Vector3{x, y, z}
-            pos_min = linalg.min(pos_min, v)
-            pos_max = linalg.max(pos_max, v)
-
             append(&positions, Vector3{x, y, z})
         case "vn":
             x := strconv.parse_f32(parts[1]) or_else 0
@@ -137,9 +130,6 @@ parse_wavefront_mesh :: proc(text: string, counter_clockwise := true, flip_uv :=
             }
         }
     }
-
-    fmt.printfln("Loaded wavefront model: vertices {}, indicies {}", len(vertices), len(indices))
-    fmt.printfln("- Bounds: {:0.2f} to {:0.2f}", pos_min, pos_max)
 
     mesh := Mesh {
         vertices = vertices[:],

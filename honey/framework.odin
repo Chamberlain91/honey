@@ -10,107 +10,121 @@ import "core:slice"
 import "core:strings"
 import ray "vendor:raylib"
 
-screen: Image
-screen_depth: []f32
+DEV_BUILD :: #config(DEV_BUILD, ODIN_DEBUG)
 
 @(private = "file")
 texture_: ray.Texture2D
 
-initialize_window :: proc(width, height: int, title: string) {
+// Initialize the window and resources needed to display graphics and handle user input.
+// - `width`, `height` Size of the framebuffer.
+// - `scale` Used to scale up the specified `width` and `height` when creating the window.
+// - `target_fps` Set to `0` to match the primary monitor. Set to `negative` to unlock framerate. Set `positive` to lock framerate to specified number.
+initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fps: int = 0) {
 
     ray.SetTraceLogLevel(.WARNING)
 
     title := strings.clone_to_cstring(title, context.temp_allocator)
-    ray.InitWindow(cast(c.int)width, cast(c.int)height, title)
+    ray.InitWindow(cast(c.int)(cast(f32)width * scale), cast(c.int)(cast(f32)height * scale), title)
 
     // Match monitor FPS.
-    // ray.SetTargetFPS(ray.GetMonitorRefreshRate(ray.GetCurrentMonitor()))
+    if target_fps == 0 {
+        ray.SetTargetFPS(ray.GetMonitorRefreshRate(ray.GetCurrentMonitor()))
+    } else if target_fps > 0 {
+        ray.SetTargetFPS(cast(c.int)target_fps)
+    }
 
     // Construct screen image.
     {
-        img := ray.GenImageColor(SCREEN_W, SCREEN_H, ray.RED)
+        img := ray.GenImageColor(cast(c.int)width, cast(c.int)height, ray.RED)
         defer ray.UnloadImage(img)
 
-        screen = image_clone_aligned((cast([^]Color)img.data)[0:SCREEN_W * SCREEN_H], SCREEN_W, SCREEN_H)
-        screen_depth = mem.make_aligned([]f32, SCREEN_W * SCREEN_H, 16) or_else panic("Allocation failed.")
+        _ctx.framebuffer = allocate_framebuffer(width, height)
 
         texture_ = ray.LoadTextureFromImage(img)
     }
 }
 
-destroy_window :: proc() {
+shutdown :: proc() {
     ray.UnloadTexture(texture_)
     ray.CloseWindow()
 }
 
+// Determines if the window still wants to be open.
 is_window_open :: proc() -> bool {
     return !ray.WindowShouldClose()
 }
 
+// Close the window, likely terminating the main loop.
 quit :: proc() {
     ray.CloseWindow()
 }
 
-// Seconds
-get_time :: proc() -> f32 {
+// Gets an absolute time in seconds.
+time :: proc() -> f32 {
     return cast(f32)ray.GetTime()
 }
 
-// Seconds
-get_delta_time :: proc() -> f32 {
+// Gets the relative time in seconds since last frame.
+delta_time :: proc() -> f32 {
     return ray.GetFrameTime()
 }
 
-get_window_size :: proc() -> [2]int {
+// Gets the size of the window (may differ from the framebuffer size based on initialization scale).
+window_size :: proc() -> [2]int {
     return {cast(int)ray.GetScreenWidth(), cast(int)ray.GetScreenHeight()}
 }
 
-update_screen_pixels :: proc(info: string) {
+@(private)
+flush_frame :: proc() {
 
     // Update texture with image contents.
-    ray.UpdateTexture(texture_, raw_data(screen.data))
-
-    status := fmt.ctprintf(
-        "{} x {} | Frame time: {:.2f} ms ({} fps)\n{}",
-        expand_values(screen.size),
-        1000.0 / cast(f32)ray.GetFPS(),
-        ray.GetFPS(),
-        info,
-    )
+    ray.UpdateTexture(texture_, raw_data(_ctx.framebuffer.color))
 
     // Flush texture to the screen
     // Draw the texture flipped to that 0,0 image coordinates is bottom-left.
     ray.BeginDrawing()
+
     ray.ClearBackground(ray.BLACK)
     ray.DrawTexturePro(
         texture_,
         {0, 0, cast(f32)texture_.width, cast(f32)-texture_.height},
-        {0, 0, cast(f32)texture_.width * FACTOR, cast(f32)texture_.height * FACTOR},
+        {0, 0, cast(f32)ray.GetScreenWidth(), cast(f32)ray.GetScreenHeight()},
         {0, 0},
         0,
         ray.WHITE,
     )
-    ray.DrawText(status, 10, 10, 20, ray.WHITE)
+
+    when DEV_BUILD {
+        status := fmt.ctprintf(
+            "{} x {} | Frame time: {:.2f} ms ({} fps)\n{}",
+            expand_values(_ctx.framebuffer.size),
+            1000.0 / cast(f32)ray.GetFPS(),
+            ray.GetFPS(),
+            _ctx.debug_text,
+        )
+        ray.DrawText(status, 10, 10, 20, ray.WHITE)
+    }
+
     ray.EndDrawing()
 }
-
-// ----
 
 Vector2 :: [2]f32
 Vector3 :: [3]f32
 Vector4 :: [4]f32
 
-Matrix :: matrix[4, 4]f32
+Vector2i :: [2]int
+Vector3i :: [3]int
+Vector4i :: [4]int
 
-// ----
+Size :: Vector2i
+
+Matrix :: matrix[4, 4]f32
 
 Color :: ray.Color
 
 mix_color :: proc(a, b: Color, t: f32) -> Color {
     return ray.ColorLerp(a, b, t)
 }
-
-// ----
 
 Key :: distinct ray.KeyboardKey
 
@@ -137,8 +151,19 @@ mouse_position :: proc() -> Vector2 {
 }
 
 // Sets the current mouse position.
-set_mouse_position :: proc(position: [2]int) {
+set_mouse_position :: proc(position: Vector2i) {
     ray.SetMousePosition(auto_cast position.x, auto_cast position.y)
+}
+
+// Show or hide the cursor.
+set_cursor_visible :: proc(enable: bool) {
+    if enable do ray.ShowCursor()
+    else do ray.HideCursor()
+}
+
+// Determine if the cursor is visible.
+is_cursor_visible :: proc() -> bool {
+    return !ray.IsCursorHidden()
 }
 
 // Gets the mouse delta position (difference since last frame).
@@ -161,6 +186,8 @@ mouse_down :: proc(button: Mouse_Button) -> bool {
     return ray.IsMouseButtonDown(auto_cast button)
 }
 
+// TODO: Gamepad
+
 // -----------------------------------------------------------------------------
 
 Image :: struct {
@@ -172,28 +199,7 @@ Image :: struct {
     },
 }
 
-image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
-
-    aligned_memory, err := mem.make_aligned([]Color, len(pixels), 16)
-    if err != .None {
-        fmt.panicf("Unable to allocate aligned image memory: {}", err)
-    }
-
-    assert(len(pixels) == len(aligned_memory))
-    copy(aligned_memory, pixels)
-
-    image := Image {
-        data = aligned_memory,
-        size = {w, h},
-        simd = {     //
-            begin = cast(uintptr)raw_data(aligned_memory),
-            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(len(pixels) * size_of(Color)),
-        },
-    }
-
-    return image
-}
-
+/// Loads and image from the specified path.
 image_load :: proc(path: string) -> Image {
 
     image, _ := png.load_from_file(path)
@@ -205,25 +211,54 @@ image_load :: proc(path: string) -> Image {
     fmt.printfln("Loaded image: {}x{} with {} pixels", image.width, image.height, len(pixels))
 
     return image_clone_aligned(pixels, image.width, image.height)
+
+    image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
+
+        aligned_memory, err := mem.make_aligned([]Color, len(pixels), 16)
+        if err != .None {
+            fmt.panicf("Unable to allocate aligned image memory: {}", err)
+        }
+
+        assert(len(pixels) == len(aligned_memory))
+        copy(aligned_memory, pixels)
+
+        image := Image {
+            data = aligned_memory,
+            size = {w, h},
+            simd = {     //
+                begin = cast(uintptr)raw_data(aligned_memory),
+                end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(len(pixels) * size_of(Color)),
+            },
+        }
+
+        return image
+    }
 }
 
+// TODO: image_load_bytes, image_load_path, image_load group
+
+// TODO: Document
 image_clear :: proc(image: Image, color: Color) {
     slice.fill(image.data, color)
 }
 
+// TODO: Document
 image_set_pixel :: #force_inline proc(image: Image, x, y: int, color: Color) #no_bounds_check {
     image_get_pixel_ptr(image, x, y)[0] = color
 }
 
+// TODO: Document
 image_get_pixel :: #force_inline proc(image: Image, x, y: int) -> Color #no_bounds_check {
     return image_get_pixel_ptr(image, x, y)[0]
 }
 
+// TODO: Document
 image_get_pixel_ptr :: #force_inline proc(image: Image, x, y: int) -> [^]Color #no_bounds_check {
     return raw_data(image.data)[(y * image.size.x) + x:]
 }
 
 // Nearest sample an image.
+@(private)
 image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
 
     x := cast(int)(uv.x * cast(f32)(image.size.x - 1))
@@ -235,6 +270,7 @@ image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
 }
 
 // Nearest sample an image using SIMD operations.
+@(private)
 image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
 
     U, V := U, V
