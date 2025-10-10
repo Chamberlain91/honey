@@ -20,6 +20,7 @@ DEFAULT_CLEAR_DEPTH: f32 : 1.0
 _ctx: struct {
     debug_text:    string,
     framebuffer:   Framebuffer,
+    renderer:      Renderer,
     toggles:       bit_set[Toggle],
     sun_direction: Vector3,
     stats:         struct {
@@ -112,11 +113,12 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
 
 // Ends rendering, flushing the framebuffer to the screen.
 end_rendering :: proc() {
+    renderer_flush(_ctx.renderer)
     flush_frame()
 }
 
 // Draws the specified mesh.
-draw_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) #no_bounds_check {
+draw_mesh :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
 
     if len(mesh.indices) > 0 {
 
@@ -144,7 +146,7 @@ draw_mesh :: proc(mesh: Mesh, image: Image, transform: Matrix) #no_bounds_check 
 }
 
 // Draws the specified triangle.
-draw_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) #no_bounds_check {
+draw_triangle :: proc(v0, v1, v2: Vertex, image: ^Image, transform: Matrix) #no_bounds_check {
 
     // World -> Clip
     p0 := transform_vertex(v0, transform)
@@ -192,31 +194,39 @@ draw_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) #no_b
     if p0.z > +p0.w && p1.z > +p1.w && p2.z > +p2.w do return
     if p0.z < 0 && p1.z < 0 && p2.z < 0 do return
 
+    Triangle_Buffer :: sa.Small_Array(3, Triangle)
+
     // Clip the triangle if it intercepts the near z-plane.
     // This will generate 1 or 2 triangles to render.
     // Other clipping planes are handled by raster clipping.
-    Triangle_Buffer :: sa.Small_Array(3, Triangle)
+    @(thread_local)
     triangles: Triangle_Buffer
+    sa.clear(&triangles)
+
+    // Reduces the vertex properties to only the ones needed for vertex interpolation.
+    v0 := Triangle_Vertex{v0.normal, v0.uv}
+    v1 := Triangle_Vertex{v1.normal, v1.uv}
+    v2 := Triangle_Vertex{v2.normal, v2.uv}
 
     if p0.z < 0 {
         if p1.z < 0 {
-            clip2({{p0, p1, p2}, {v0, v1, v2}}, &triangles)
+            clip2({{p0, p1, p2}, {v0, v1, v2}, image}, &triangles)
         } else if p2.z < 0 {
-            clip2({{p0, p2, p1}, {v0, v2, v1}}, &triangles)
+            clip2({{p0, p2, p1}, {v0, v2, v1}, image}, &triangles)
         } else {
-            clip1({{p0, p1, p2}, {v0, v1, v2}}, &triangles)
+            clip1({{p0, p1, p2}, {v0, v1, v2}, image}, &triangles)
         }
     } else if p1.z < 0 {
         if p2.z < 0 {
-            clip2({{p1, p2, p0}, {v1, v2, v0}}, &triangles)
+            clip2({{p1, p2, p0}, {v1, v2, v0}, image}, &triangles)
         } else {
-            clip1({{p1, p0, p2}, {v1, v0, v2}}, &triangles)
+            clip1({{p1, p0, p2}, {v1, v0, v2}, image}, &triangles)
         }
     } else if p2.z < 0 {
-        clip1({{p2, p0, p1}, {v2, v0, v1}}, &triangles)
+        clip1({{p2, p0, p1}, {v2, v0, v1}, image}, &triangles)
     } else {
         // No clipping needed
-        sa.append(&triangles, Triangle{{p0, p1, p2}, {v0, v1, v2}})
+        sa.append(&triangles, Triangle{{p0, p1, p2}, {v0, v1, v2}, image})
     }
 
     // Draw each triangle.
@@ -235,22 +245,11 @@ draw_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) #no_b
             pos.y *= cast(f32)_ctx.framebuffer.height
         }
 
-        p0, p1, p2 = expand_values(triangle.positions)
-
-        // Find triangle bounds...
-        triangle_min := la.array_cast(la.floor(la.min(p0.xy, p1.xy, p2.xy)), int)
-        triangle_max := la.array_cast(la.ceil(la.max(p0.xy, p1.xy, p2.xy)), int)
-
-        // ... clamp to screen (x and y clip planes)
-        triangle_min = la.clamp(triangle_min, 0, _ctx.framebuffer.size)
-        triangle_max = la.clamp(triangle_max, 0, _ctx.framebuffer.size)
-
         // Render the triangle!
-        if !get_toggle(.Disable_SIMD) && simd.HAS_HARDWARE_SIMD {
-            rasterize_triangle_simd(triangle, triangle_min, triangle_max, image)
-        } else {
-            rasterize_triangle(triangle, triangle_min, triangle_max, image)
-        }
+        // rasterize_triangle(triangle, 0, _ctx.framebuffer.size - 1)
+
+        // Submit triangle to the tiled region.
+        renderer_append_triangle(_ctx.renderer, triangle)
     }
 
     // Count the number of triangles drawn.
@@ -275,8 +274,8 @@ draw_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) #no_b
         vA := interpolate_vertex(v0, v1, alphaA)
         vB := interpolate_vertex(v0, v2, alphaB)
 
-        sa.append(output, Triangle{{pA, p1, p2}, {vA, v1, v2}})
-        sa.append(output, Triangle{{pB, pA, p2}, {vB, vA, v2}})
+        sa.append(output, Triangle{{pA, p1, p2}, {vA, v1, v2}, triangle.image})
+        sa.append(output, Triangle{{pB, pA, p2}, {vB, vA, v2}, triangle.image})
     }
 
     clip2 :: proc(triangle: Triangle, output: ^Triangle_Buffer) {
@@ -292,19 +291,32 @@ draw_triangle :: proc(v0, v1, v2: Vertex, image: Image, transform: Matrix) #no_b
         v0 = interpolate_vertex(v0, v2, alpha0)
         v1 = interpolate_vertex(v1, v2, alpha1)
 
-        sa.append(output, Triangle{{p0, p1, p2}, {v0, v1, v2}})
+        sa.append(output, Triangle{{p0, p1, p2}, {v0, v1, v2}, triangle.image})
     }
 
-    interpolate_vertex :: proc(a, b: Vertex, t: f32) -> (c: Vertex) {
-        c.position = la.lerp(a.position, b.position, t) // Not used as a interpolated value (can remove?)
+    interpolate_vertex :: proc(a, b: Triangle_Vertex, t: f32) -> (c: Triangle_Vertex) {
         c.normal = la.lerp(a.normal, b.normal, t)
         c.uv = la.lerp(a.uv, b.uv, t)
         return
     }
 }
 
+
+@(private)
+rasterize_triangle :: proc(triangle: Triangle, viewport_min, viewport_max: [2]int) #no_bounds_check {
+
+    range_min, range_max := compute_triangle_bounds(triangle, viewport_min, viewport_max)
+
+    // Render the triangle!
+    if !get_toggle(.Disable_SIMD) && simd.HAS_HARDWARE_SIMD {
+        rasterize_triangle_simd(triangle, range_min, range_max)
+    } else {
+        rasterize_triangle_normal(triangle, range_min, range_max)
+    }
+}
+
 @(private = "file")
-rasterize_triangle :: proc(triangle: Triangle, triangle_min, triangle_max: [2]int, image: Image) #no_bounds_check {
+rasterize_triangle_normal :: proc(triangle: Triangle, triangle_min, triangle_max: [2]int) #no_bounds_check {
 
     v0, v1, v2 := expand_values(triangle.positions)
     a, b, c := expand_values(triangle.vertices)
@@ -324,12 +336,12 @@ rasterize_triangle :: proc(triangle: Triangle, triangle_min, triangle_max: [2]in
     delta_weights_col: [3]f32 = {v1.y - v2.y, v2.y - v0.y, v0.y - v1.y}
     delta_weights_row: [3]f32 = {v2.x - v1.x, v0.x - v2.x, v1.x - v0.x}
 
-    for y in triangle_min.y ..< triangle_max.y {
+    for y in triangle_min.y ..= triangle_max.y {
 
         weights_col := weights_row
         weights_row += delta_weights_row // ???
 
-        for x in triangle_min.x ..< triangle_max.x {
+        for x in triangle_min.x ..= triangle_max.x {
 
             weights := weights_col * inv_area
             weights_col += delta_weights_col // ???
@@ -362,7 +374,7 @@ rasterize_triangle :: proc(triangle: Triangle, triangle_min, triangle_max: [2]in
 
             // ---- FRAGMENT SHADER BEGIN ---
 
-            pixel := image_sample(image, fragment_uv)
+            pixel := image_sample(triangle.image^, fragment_uv)
 
             brightness := max(0.0, la.dot(fragment_normal, _ctx.sun_direction))
             pixel = mix_color(0, pixel, 0.25 + (brightness * 0.75))
@@ -382,11 +394,7 @@ rasterize_triangle :: proc(triangle: Triangle, triangle_min, triangle_max: [2]in
 }
 
 @(private = "file")
-rasterize_triangle_simd :: proc(
-    triangle: Triangle,
-    triangle_min, triangle_max: [2]int,
-    image: Image,
-) #no_bounds_check {
+rasterize_triangle_simd :: proc(triangle: Triangle, triangle_min, triangle_max: Vector2i) #no_bounds_check {
 
     v0, v1, v2 := expand_values(triangle.positions)
     a, b, c := expand_values(triangle.vertices)
@@ -398,7 +406,7 @@ rasterize_triangle_simd :: proc(
 
     // SIMD reads and writes need to be 16 byte aligned.
     align_min_x := mem.align_backward_int(triangle_min.x, 4)
-    align_max_x := mem.align_forward_int(triangle_max.x, 4)
+    align_max_x := mem.align_backward_int(triangle_max.x, 4)
 
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
     align_offset := cast(f32)(align_min_x - triangle_min.x)
@@ -418,7 +426,7 @@ rasterize_triangle_simd :: proc(
     steps_v20y := v20.y * STEP_SIZES
     steps_v01y := v01.y * STEP_SIZES
 
-    for y in triangle_min.y ..< triangle_max.y {
+    for y in triangle_min.y ..= triangle_max.y {
 
         weights_col_0 := weights_row_0 + (align_offset * v12.y)
         weights_col_1 := weights_row_1 + (align_offset * v20.y)
@@ -428,7 +436,7 @@ rasterize_triangle_simd :: proc(
         weights_row_1 -= v20.x
         weights_row_2 -= v01.x
 
-        for x := align_min_x; x < align_max_x; x += 4 {
+        for x := align_min_x; x <= align_max_x; x += 4 {
 
             w0 := (weights_col_0 + steps_v12y) * inv_area
             w1 := (weights_col_1 + steps_v20y) * inv_area
@@ -478,7 +486,7 @@ rasterize_triangle_simd :: proc(
 
             // ---- FRAGMENT SHADER BEGIN ---
 
-            R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(image, U, V))
+            R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(triangle.image^, U, V))
 
             brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, _ctx.sun_direction)) * 0.75)
 
@@ -524,7 +532,23 @@ rasterize_triangle_simd :: proc(
     }
 }
 
-@(private = "file")
+@(private)
+compute_triangle_bounds :: proc(triangle: Triangle, viewport_min, viewport_max: Vector2i) -> (r_min, r_max: Vector2i) {
+
+    p0, p1, p2 := expand_values(triangle.positions)
+
+    // Find triangle bounds...
+    r_min = la.array_cast(la.min(p0.xy, p1.xy, p2.xy), int)
+    r_max = la.array_cast(la.max(p0.xy, p1.xy, p2.xy), int)
+
+    // Clamp rasterization bounds to the viewport.
+    r_min = la.clamp(r_min, viewport_min, viewport_max)
+    r_max = la.clamp(r_max, viewport_min, viewport_max)
+
+    return
+}
+
+@(private)
 compute_index :: #force_inline proc(x, y, width: int) -> int {
     return (y * width) + x
 }
@@ -534,8 +558,15 @@ signed_area :: #force_inline proc(a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
-@(private = "file")
+@(private)
 Triangle :: struct {
     positions: [3]Vector4,
-    vertices:  [3]Vertex,
+    vertices:  [3]Triangle_Vertex,
+    image:     ^Image,
+}
+
+@(private)
+Triangle_Vertex :: struct {
+    normal: Vector3,
+    uv:     Vector2,
 }

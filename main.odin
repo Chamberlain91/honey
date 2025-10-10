@@ -32,19 +32,19 @@ main :: proc() {
         indices  = {0, 1, 2, 0, 2, 3},
     }
 
-    camera_position: honey.Vector3
-    camera_heading: f32
-    camera_pitch: f32
+    camera_position: honey.Vector3 = {-15, 15, 15}
+    camera_heading: f32 = -0.69
+    camera_pitch: f32 = -0.61
 
     // Main loop.
     main_loop: for honey.is_window_open() {
         defer free_all(context.temp_allocator)
 
-        // Show cursor when holding left ALT.
+        // Show cursor when holding Left ALT.
         honey.set_cursor_visible(honey.is_key_down(.LEFT_ALT))
 
-        // Mouse grab.
-        defer if !honey.is_cursor_visible() {
+        // Only grab the cursor when its hidden and window has focus.
+        defer if !honey.is_cursor_visible() && honey.is_window_focused() {
             honey.set_mouse_position(honey.window_size() / 2)
         }
 
@@ -55,19 +55,19 @@ main :: proc() {
         }
 
         camera_matrix :=
-            la.matrix4_perspective_f32(math.PI / 2, honey.get_framebuffer_aspect(), 0.1, 50.0) *
+            la.matrix4_perspective_f32(math.PI / 2, honey.get_framebuffer_aspect(), 0.1, 60.0) *
             la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
         honey.begin_rendering()
         {
             // Draw the floor quad.
-            honey.draw_mesh(floor_quad, character_image, camera_matrix)
+            honey.draw_mesh(floor_quad, &character_image, camera_matrix)
 
             // Draw an array of character models.
             for y: f32 = -15; y <= 15; y += 5.0 {
                 for x: f32 = -15; x <= 15; x += 5.0 {
                     transform := la.matrix4_translate_f32({x, x * 0.5, y})
-                    honey.draw_mesh(character_mesh, character_image, camera_matrix * transform)
+                    honey.draw_mesh(character_mesh, &character_image, camera_matrix * transform)
                 }
             }
         }

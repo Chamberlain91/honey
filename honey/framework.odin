@@ -39,6 +39,7 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         defer ray.UnloadImage(img)
 
         _ctx.framebuffer = allocate_framebuffer(width, height)
+        _ctx.renderer = renderer_create()
 
         texture_ = ray.LoadTextureFromImage(img)
     }
@@ -161,7 +162,12 @@ set_cursor_visible :: proc(enable: bool) {
     else do ray.HideCursor()
 }
 
-// Determine if the cursor is visible.
+// Determines if the window has focus.
+is_window_focused :: proc() -> bool {
+    return ray.IsWindowFocused()
+}
+
+// Determines if the cursor is visible.
 is_cursor_visible :: proc() -> bool {
     return !ray.IsCursorHidden()
 }
@@ -171,17 +177,17 @@ mouse_delta :: proc() -> Vector2 {
     return ray.GetMouseDelta()
 }
 
-// Determine if the mouse button was just pressed this frame.
+// Determines if the mouse button was just pressed this frame.
 mouse_pressed :: proc(button: Mouse_Button) -> bool {
     return ray.IsMouseButtonPressed(auto_cast button)
 }
 
-// Determine if the mouse button was just released this frame.
+// Determines if the mouse button was just released this frame.
 mouse_released :: proc(button: Mouse_Button) -> bool {
     return ray.IsMouseButtonReleased(auto_cast button)
 }
 
-// Determine if the mouse button is held.
+// Determines if the mouse button is held.
 mouse_down :: proc(button: Mouse_Button) -> bool {
     return ray.IsMouseButtonDown(auto_cast button)
 }
