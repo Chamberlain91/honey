@@ -72,9 +72,10 @@ main :: proc() {
             }
         }
         status := fmt.tprintf(
-            "(X) backface: {}\n(Z) use simd: {}\ntriangle count: {}",
+            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}",
             honey.get_toggle(.Backface_Culling),
             !honey.get_toggle(.Disable_SIMD),
+            honey.get_toggle(.Multithreading),
             honey.get_triangle_count(),
         )
         honey.set_debug_text(status)
@@ -107,6 +108,11 @@ main :: proc() {
         // Backface culling
         if honey.is_key_pressed(.X) {
             honey.set_toggle(.Backface_Culling, !honey.get_toggle(.Backface_Culling))
+        }
+
+        // Multithreading
+        if honey.is_key_pressed(.C) {
+            honey.set_toggle(.Multithreading, !honey.get_toggle(.Multithreading))
         }
     }
 }
