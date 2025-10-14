@@ -39,7 +39,8 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         defer ray.UnloadImage(img)
 
         _ctx.framebuffer = allocate_framebuffer(width, height)
-        _ctx.renderer = renderer_create()
+        renderer_init(&_ctx.renderer)
+        thread_init()
 
         texture_ = ray.LoadTextureFromImage(img)
     }
@@ -76,7 +77,7 @@ window_size :: proc() -> [2]int {
 }
 
 @(private)
-flush_frame :: proc() {
+window_flush_content :: proc() {
 
     // Update texture with image contents.
     ray.UpdateTexture(texture_, raw_data(_ctx.framebuffer.color))
@@ -123,7 +124,7 @@ Matrix :: matrix[4, 4]f32
 
 Color :: ray.Color
 
-mix_color :: proc(a, b: Color, t: f32) -> Color {
+mix_color :: proc "contextless" (a, b: Color, t: f32) -> Color {
     return ray.ColorLerp(a, b, t)
 }
 
@@ -265,7 +266,7 @@ image_get_pixel_ptr :: #force_inline proc(image: Image, x, y: int) -> [^]Color #
 
 // Nearest sample an image.
 @(private)
-image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
+image_sample :: proc "contextless" (image: Image, uv: [2]f32) -> Color #no_bounds_check {
 
     x := cast(int)(uv.x * cast(f32)(image.size.x - 1))
     y := cast(int)(uv.y * cast(f32)(image.size.y - 1))
@@ -277,7 +278,7 @@ image_sample :: proc(image: Image, uv: [2]f32) -> Color #no_bounds_check {
 
 // Nearest sample an image using SIMD operations.
 @(private)
-image_sample_simd :: proc(image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
+image_sample_simd :: proc "contextless" (image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
 
     U, V := U, V
 

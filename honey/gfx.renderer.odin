@@ -2,8 +2,9 @@
 package honey
 
 import la "core:math/linalg"
-import "core:mem"
 import "core:simd"
+import "core:sync"
+import "core:thread"
 
 @(private)
 SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
@@ -15,11 +16,13 @@ Renderer :: struct {
 }
 
 Renderer_Tile :: struct {
+    renderer:  ^Renderer,
     min, max:  Vector2i,
     triangles: [dynamic]Triangle,
+    mutex:     sync.Atomic_Mutex,
 }
 
-renderer_create :: proc(tile_size: int = 64) -> (r: Renderer) {
+renderer_init :: proc(r: ^Renderer, tile_size: int = 64) {
 
     r.tile_size = tile_size
     r.count = ((_ctx.framebuffer.size + (tile_size - 1)) / tile_size)
@@ -31,9 +34,12 @@ renderer_create :: proc(tile_size: int = 64) -> (r: Renderer) {
             r_min := Vector2i{x, y} * tile_size
             r_max := la.min(r_min + tile_size, _ctx.framebuffer.size - 1)
 
-            r.tiles[compute_index(x, y, r.count.x)] = Renderer_Tile {
-                min = r_min,
-                max = r_max,
+            tile := &r.tiles[compute_index(x, y, r.count.x)]
+
+            tile^ = Renderer_Tile {
+                renderer = r,
+                min      = r_min,
+                max      = r_max,
             }
         }
     }
@@ -42,46 +48,61 @@ renderer_create :: proc(tile_size: int = 64) -> (r: Renderer) {
 }
 
 // Submit the triangle to all tiles it touches.
-renderer_append_triangle :: proc(renderer: Renderer, triangle: Triangle) #no_bounds_check {
+renderer_append_triangle :: proc(renderer: ^Renderer, triangle: Triangle) #no_bounds_check {
+
+    triangle_min, triangle_max := compute_triangle_bounds(triangle, 0, _ctx.framebuffer.size - 1)
 
     // Compute the rectangular range of overlapping tiles.
-    co_min, co_max := compute_triangle_bounds(triangle, 0, _ctx.framebuffer.size - 1)
-    co_min = (co_min) / renderer.tile_size
-    co_max = (co_max + (renderer.tile_size - 1)) / renderer.tile_size
+    co_min := (triangle_min) / renderer.tile_size
+    co_max := (triangle_max + (renderer.tile_size - 1)) / renderer.tile_size
 
     for y in co_min.y ..< co_max.y {
         for x in co_min.x ..< co_max.x {
             tile := &renderer.tiles[compute_index(x, y, renderer.count.x)]
+            // sync.guard(&tile.mutex) // TODO: Only needed if/when parallel vertices
             append(&tile.triangles, triangle)
         }
     }
 }
 
-// Waits for this tile to finish rendering its triangles task list.
-renderer_wait_tile :: proc(tile: ^Renderer_Tile) {
-
-    // TODO: Actually make async
-    for triangle in pop_safe(&tile.triangles) {
-        rasterize_triangle(triangle, tile.min, tile.max)
-    }
+renderer_begin :: proc(renderer: ^Renderer) {
+    // Nothing
 }
 
 // Blocks to ensure all rendering of tiles have completed.
-renderer_flush :: proc(renderer: Renderer) {
+renderer_end :: proc(renderer: ^Renderer) {
 
+    // Schedule rendering each tile.
+    sync.wait_group_add(&_ctx.wait_group, len(renderer.tiles))
     for &tile in renderer.tiles {
+        thread.pool_add_task(&_ctx.pool, {}, process_tile, &tile)
+    }
 
-        // Wait for the rendering thread to exit.
-        renderer_wait_tile(&tile)
+    // Wait for all tiles to complete.
+    sync.wait_group_wait(&_ctx.wait_group)
 
-        // At this point, all triangles in the tile need to be processed.
+    // At this point, all triangles in the tile need to be processed.
+    for &tile in renderer.tiles {
         assert(len(tile.triangles) == 0)
+    }
+
+    process_tile :: proc(task: thread.Task) {
+
+        // Rasterization work should be contextless.
+        context.temp_allocator = {}
+        context.allocator = {}
+
+        tile := cast(^Renderer_Tile)task.data
+        for triangle in pop_safe(&tile.triangles) {
+            rasterize_triangle(triangle, tile.min, tile.max)
+        }
+
+        sync.wait_group_done(&_ctx.wait_group)
     }
 }
 
-
 @(private)
-rasterize_triangle :: proc(triangle: Triangle, viewport_min, viewport_max: [2]int) #no_bounds_check {
+rasterize_triangle :: proc "contextless" (triangle: Triangle, viewport_min, viewport_max: [2]int) #no_bounds_check {
 
     range_min, range_max := compute_triangle_bounds(triangle, viewport_min, viewport_max)
 
@@ -94,7 +115,10 @@ rasterize_triangle :: proc(triangle: Triangle, viewport_min, viewport_max: [2]in
 }
 
 @(private = "file")
-rasterize_triangle_normal :: proc(triangle: Triangle, triangle_min, triangle_max: [2]int) #no_bounds_check {
+rasterize_triangle_normal :: proc "contextless" (
+    triangle: Triangle,
+    triangle_min, triangle_max: [2]int,
+) #no_bounds_check {
 
     v0, v1, v2 := expand_values(triangle.positions)
     a, b, c := expand_values(triangle.vertices)
@@ -166,13 +190,16 @@ rasterize_triangle_normal :: proc(triangle: Triangle, triangle_min, triangle_max
         }
     }
 
-    interpolate :: proc(a, b, c: $T, weights: [3]f32) -> T {
+    interpolate :: proc "contextless" (a, b, c: $T, weights: [3]f32) -> T {
         return (a * weights[0]) + (b * weights[1]) + (c * weights[2])
     }
 }
 
 @(private = "file")
-rasterize_triangle_simd :: proc(triangle: Triangle, triangle_min, triangle_max: Vector2i) #no_bounds_check {
+rasterize_triangle_simd :: proc "contextless" (
+    triangle: Triangle,
+    triangle_min, triangle_max: Vector2i,
+) #no_bounds_check {
 
     v0, v1, v2 := expand_values(triangle.positions)
     a, b, c := expand_values(triangle.vertices)
@@ -183,8 +210,8 @@ rasterize_triangle_simd :: proc(triangle: Triangle, triangle_min, triangle_max: 
     inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
 
     // SIMD reads and writes need to be 16 byte aligned.
-    align_min_x := mem.align_backward_int(triangle_min.x, 4)
-    align_max_x := mem.align_backward_int(triangle_max.x, 4)
+    align_min_x := align_backward(triangle_min.x, 4)
+    align_max_x := align_backward(triangle_max.x, 4)
 
     // Since SIMD is aligned, we need to offset the incremental barycentric too.
     align_offset := cast(f32)(align_min_x - triangle_min.x)
@@ -285,15 +312,15 @@ rasterize_triangle_simd :: proc(triangle: Triangle, triangle_min, triangle_max: 
         }
     }
 
-    interpolate :: proc(a, b, c, w0, w1, w2: #simd[4]f32) -> #simd[4]f32 {
+    interpolate :: proc "contextless" (a, b, c, w0, w1, w2: #simd[4]f32) -> #simd[4]f32 {
         return (a * w0) + (b * w1) + (c * w2)
     }
 
-    dot :: proc(ax, ay, az: #simd[4]f32, b: Vector3) -> #simd[4]f32 {
+    dot :: proc "contextless" (ax, ay, az: #simd[4]f32, b: Vector3) -> #simd[4]f32 {
         return interpolate(ax, ay, az, b.x, b.y, b.z)
     }
 
-    convert_f32_to_u32_simd :: proc(R, G, B, A: #simd[4]f32) -> #simd[4]u32 {
+    convert_f32_to_u32_simd :: proc "contextless" (R, G, B, A: #simd[4]f32) -> #simd[4]u32 {
         Ri := cast(#simd[4]u32)(R * 0xFF)
         Gi := simd.shl(cast(#simd[4]u32)(G * 0xFF), 8)
         Bi := simd.shl(cast(#simd[4]u32)(B * 0xFF), 16)
@@ -301,16 +328,21 @@ rasterize_triangle_simd :: proc(triangle: Triangle, triangle_min, triangle_max: 
         return Ri | Gi | Bi | Ai
     }
 
-    convert_u32_to_f32_simd :: proc(color: #simd[4]u32) -> (R, G, B, A: #simd[4]f32) {
+    convert_u32_to_f32_simd :: proc "contextless" (color: #simd[4]u32) -> (R, G, B, A: #simd[4]f32) {
         R = (cast(#simd[4]f32)(color & 0xFF)) / 0xFF
         G = (cast(#simd[4]f32)(simd.shr(color, 8) & 0xFF)) / 0xFF
         B = (cast(#simd[4]f32)(simd.shr(color, 16) & 0xFF)) / 0xFF
         A = (cast(#simd[4]f32)(simd.shr(color, 24) & 0xFF)) / 0xFF
         return
     }
+
+    @(require_results)
+    align_backward :: proc "contextless" (ptr, align: int) -> int {
+        return ptr & ~(align - 1)
+    }
 }
 
 @(private = "file")
-signed_area :: #force_inline proc(a, b, c: [2]f32) -> f32 {
+signed_area :: #force_inline proc "contextless" (a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
