@@ -6,16 +6,16 @@ import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
 
-SCREEN_W :: 960
-SCREEN_H :: 540
-FACTOR :: 1.5
+RESOLUTION_FACTOR :: 2 // 4 = 1080p
+SCREEN_W :: 480 * RESOLUTION_FACTOR
+SCREEN_H :: 270 * RESOLUTION_FACTOR
 
 PITCH_LIMIT :: (math.PI / 2) * 0.9
 
 main :: proc() {
 
     // Initialize window.
-    honey.initalize(SCREEN_W, SCREEN_H, "Honey Software Renderer", scale = FACTOR)
+    honey.initalize(SCREEN_W, SCREEN_H, "Honey Software Renderer", scale = 4 / RESOLUTION_FACTOR)
     defer honey.shutdown()
 
     // Load the character mesh.

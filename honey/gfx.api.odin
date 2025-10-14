@@ -1,7 +1,6 @@
 package honey
 
 import "base:intrinsics"
-import "base:runtime"
 import sa "core:container/small_array"
 import "core:fmt"
 import la "core:math/linalg"
@@ -141,15 +140,13 @@ draw_mesh :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check
 
             if get_toggle(.Multithreading) {
 
-                context = runtime.default_context()
-
                 // Submit triangle to the tiled region.
                 renderer_append_triangle(&_ctx.renderer, tri)
 
             } else {
 
                 // Render the triangle, directly.
-                rasterize_triangle(tri, 0, _ctx.framebuffer.size - 1)
+                rasterize_triangle(tri, compute_triangle_bounds(tri, 0, _ctx.framebuffer.size - 1))
             }
         }
 

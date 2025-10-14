@@ -11,14 +11,19 @@ SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
 
 Renderer :: struct {
     tile_size: int,
-    tiles:     []Renderer_Tile,
+    tiles:     []Raster_Tile,
     count:     Size,
 }
 
-Renderer_Tile :: struct {
+Raster_Tile_Triangle :: struct {
+    using triangle: Triangle,
+    min, max:       Vector2i,
+}
+
+Raster_Tile :: struct {
     renderer:  ^Renderer,
     min, max:  Vector2i,
-    triangles: [dynamic]Triangle,
+    triangles: [dynamic]Raster_Tile_Triangle,
     mutex:     sync.Atomic_Mutex,
 }
 
@@ -26,7 +31,7 @@ renderer_init :: proc(r: ^Renderer, tile_size: int = 64) {
 
     r.tile_size = tile_size
     r.count = ((_ctx.framebuffer.size + (tile_size - 1)) / tile_size)
-    r.tiles = make([]Renderer_Tile, r.count.x * r.count.y)
+    r.tiles = make([]Raster_Tile, r.count.x * r.count.y)
 
     for y in 0 ..< r.count.y {
         for x in 0 ..< r.count.x {
@@ -36,7 +41,7 @@ renderer_init :: proc(r: ^Renderer, tile_size: int = 64) {
 
             tile := &r.tiles[compute_index(x, y, r.count.x)]
 
-            tile^ = Renderer_Tile {
+            tile^ = Raster_Tile {
                 renderer = r,
                 min      = r_min,
                 max      = r_max,
@@ -60,7 +65,7 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: Triangle) #no_bo
         for x in co_min.x ..< co_max.x {
             tile := &renderer.tiles[compute_index(x, y, renderer.count.x)]
             // sync.guard(&tile.mutex) // TODO: Only needed if/when parallel vertices
-            append(&tile.triangles, triangle)
+            append_elem(&tile.triangles, Raster_Tile_Triangle{triangle, triangle_min, triangle_max})
         }
     }
 }
@@ -92,9 +97,14 @@ renderer_end :: proc(renderer: ^Renderer) {
         context.temp_allocator = {}
         context.allocator = {}
 
-        tile := cast(^Renderer_Tile)task.data
+        tile := cast(^Raster_Tile)task.data
         for triangle in pop_safe(&tile.triangles) {
-            rasterize_triangle(triangle, tile.min, tile.max)
+
+            // Clamp rasterization bounds to the viewport.
+            range_min := la.clamp(triangle.min, tile.min, tile.max)
+            range_max := la.clamp(triangle.max, tile.min, tile.max)
+
+            rasterize_triangle(triangle, range_min, range_max)
         }
 
         sync.wait_group_done(&_ctx.wait_group)
@@ -102,9 +112,7 @@ renderer_end :: proc(renderer: ^Renderer) {
 }
 
 @(private)
-rasterize_triangle :: proc "contextless" (triangle: Triangle, viewport_min, viewport_max: [2]int) #no_bounds_check {
-
-    range_min, range_max := compute_triangle_bounds(triangle, viewport_min, viewport_max)
+rasterize_triangle :: proc "contextless" (triangle: Triangle, range_min, range_max: [2]int) #no_bounds_check {
 
     // Render the triangle!
     if !get_toggle(.Disable_SIMD) && simd.HAS_HARDWARE_SIMD {
