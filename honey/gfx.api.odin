@@ -5,10 +5,12 @@ import sa "core:container/small_array"
 import "core:fmt"
 import la "core:math/linalg"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 DEFAULT_CLEAR_COLOR: Color : {0x18, 0x18, 0x18, 0xFF}
 
@@ -51,6 +53,14 @@ get_triangle_count :: proc() -> int {
     return _ctx.stats.triangle_count
 }
 
+get_vert_duration :: proc() -> time.Duration {
+    return _ctx.stats.vertex_duration
+}
+
+get_frag_duration :: proc() -> time.Duration {
+    return _ctx.stats.rasterization_duration
+}
+
 // TODO: Better name
 Toggle :: enum {
     Backface_Culling,
@@ -78,89 +88,92 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
     slice.fill(_ctx.framebuffer.color, color)
     slice.fill(_ctx.framebuffer.depth, depth)
 
-    _ctx.stats = {}
+    _ctx.stats = {
+        vertex_start_time = time.now(),
+    }
 
     renderer_begin(&_ctx.renderer)
 }
 
 // Ends rendering, flushing the framebuffer to the screen.
 end_rendering :: proc() {
+
+    // Vertex processing stage is now 'complete'.
+    _ctx.stats.vertex_duration = time.since(_ctx.stats.vertex_start_time)
+    rasterization_start_time := time.now()
+
+    // Count the number of triangles drawn.
+    _ctx.stats.triangle_count += len(_ctx.triangle_cache)
+
+    // Draw each clipped triangle.
+    for &tri in &_ctx.triangle_cache {
+
+        // Map the triangle to the viewport (NDC -> Viewport).
+        for &v in tri.vertices {
+
+            // Do the "perspective divide"
+            v.position.w = 1.0 / v.position.w
+            v.position.xyz *= v.position.w
+
+            // NDC -> Viewport
+            v.position.xy = (v.position.xy + 1.0) / 2.0
+            v.position.x *= cast(f32)_ctx.framebuffer.width
+            v.position.y *= cast(f32)_ctx.framebuffer.height
+        }
+
+        if get_toggle(.Multithreading) {
+
+            // Submit triangle to the tiled region.
+            renderer_append_triangle(&_ctx.renderer, &tri)
+
+        } else {
+
+            // Render the triangle, directly.
+            rasterize_triangle(&tri, compute_triangle_bounds(tri, 0, _ctx.framebuffer.size - 1))
+        }
+    }
     renderer_end(&_ctx.renderer)
+
+    _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
+
+    clear(&_ctx.triangle_cache)
     window_flush_content()
 }
 
-@(private)
-Triangle_Buffer_Capacity :: 128
-
-@(private)
-Triangle_Buffer :: sa.Small_Array(Triangle_Buffer_Capacity, Triangle)
-
 // Draws the specified mesh.
-draw_mesh :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
+draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
 
-    @(thread_local)
-    triangles: Triangle_Buffer
-    sa.clear(&triangles)
+    // We need to clear the vertex cache for each mesh, since the transform will be different.
+    clear(&_ctx.vertex_cache)
 
-    for i := 0; i < len(mesh.indices); i += 3 {
-
-        a := mesh.vertices[mesh.indices[i + 0]]
-        b := mesh.vertices[mesh.indices[i + 2]]
-        c := mesh.vertices[mesh.indices[i + 1]]
-
-        process_triangle(a, b, c, image, transform, &triangles)
-        if sa.len(triangles) >= (Triangle_Buffer_Capacity - 3) {
-            rasterize_triangle_batch(&triangles)
+    // Transform the entire mesh vertex set.
+    resize(&_ctx.vertex_cache, len(mesh.vertices))
+    for v, i in mesh.vertices {
+        _ctx.vertex_cache[i] = VS_Out {
+            position = transform_vertex(v, transform),
+            normal   = v.normal,
+            uv       = v.uv,
         }
     }
-    rasterize_triangle_batch(&triangles)
 
-    // ---
+    // Process each triangle.
+    reserve(&_ctx.triangle_cache, len(_ctx.triangle_cache) + (len(mesh.indices) / 3))
+    for i := 0; i < len(mesh.indices); i += 3 {
+        a := &_ctx.vertex_cache[mesh.indices[i + 0]]
+        b := &_ctx.vertex_cache[mesh.indices[i + 2]]
+        c := &_ctx.vertex_cache[mesh.indices[i + 1]]
+        process_triangle(a, b, c, image)
+    }
 
-    rasterize_triangle_batch :: proc(triangles: ^Triangle_Buffer) {
-
-        // Count the number of triangles drawn.
-        _ctx.stats.triangle_count += sa.len(triangles^)
-
-        // Draw each clipped triangle.
-        for &tri in sa.slice(triangles) {
-
-            // Map the triangle to the viewport (NDC -> Viewport).
-            for &pos in tri.positions {
-
-                // Do the "perspective divide"
-                pos.w = 1.0 / pos.w
-                pos.xyz *= pos.w
-
-                // NDC -> Viewport
-                pos.xy = (pos.xy + 1.0) / 2.0
-                pos.x *= cast(f32)_ctx.framebuffer.width
-                pos.y *= cast(f32)_ctx.framebuffer.height
-            }
-
-            if get_toggle(.Multithreading) {
-
-                // Submit triangle to the tiled region.
-                renderer_append_triangle(&_ctx.renderer, tri)
-
-            } else {
-
-                // Render the triangle, directly.
-                rasterize_triangle(tri, compute_triangle_bounds(tri, 0, _ctx.framebuffer.size - 1))
-            }
-        }
-
-        sa.clear(triangles)
+    transform_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
+        clip_position.xyz = vertex.position
+        clip_position.w = 1.0
+        return transform * clip_position
     }
 }
 
 @(private)
-process_triangle :: proc "contextless" (
-    v0, v1, v2: Vertex,
-    image: ^Image,
-    transform: Matrix,
-    triangles: ^Triangle_Buffer,
-) #no_bounds_check {
+process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -190,20 +203,12 @@ process_triangle :: proc "contextless" (
     //   +   +
     //  +-----+
 
-    // World -> Clip
-    p0 := transform_vertex(v0, transform)
-    p1 := transform_vertex(v1, transform)
-    p2 := transform_vertex(v2, transform)
+    p0, p1, p2 := v0.position, v1.position, v2.position
 
     // Backface culling. Compare normal to "view vector", negative indicates away from viewpoint.
     if get_toggle(.Backface_Culling) && la.dot(la.cross(p1.xyz - p0.xyz, p2.xyz - p0.xyz), p0.xyz) < 0 {
         return
     }
-
-    // Reduces the vertex properties to only the ones needed for vertex interpolation.
-    v0 := Triangle_Vertex{v0.normal, v0.uv}
-    v1 := Triangle_Vertex{v1.normal, v1.uv}
-    v2 := Triangle_Vertex{v2.normal, v2.uv}
 
     // Reject the triangle if it is completely out of view.
     if p0.x > +p0.w && p1.x > +p1.w && p2.x > +p2.w do return
@@ -215,68 +220,59 @@ process_triangle :: proc "contextless" (
 
     if p0.z < 0 {
         if p1.z < 0 {
-            clip2({{p0, p1, p2}, {v0, v1, v2}, image}, triangles)
+            clip2({{v0^, v1^, v2^}, image})
         } else if p2.z < 0 {
-            clip2({{p0, p2, p1}, {v0, v2, v1}, image}, triangles)
+            clip2({{v0^, v2^, v1^}, image})
         } else {
-            clip1({{p0, p1, p2}, {v0, v1, v2}, image}, triangles)
+            clip1({{v0^, v1^, v2^}, image})
         }
     } else if p1.z < 0 {
         if p2.z < 0 {
-            clip2({{p1, p2, p0}, {v1, v2, v0}, image}, triangles)
+            clip2({{v1^, v2^, v0^}, image})
         } else {
-            clip1({{p1, p0, p2}, {v1, v0, v2}, image}, triangles)
+            clip1({{v1^, v0^, v2^}, image})
         }
     } else if p2.z < 0 {
-        clip1({{p2, p0, p1}, {v2, v0, v1}, image}, triangles)
+        clip1({{v2^, v0^, v1^}, image})
     } else {
         // No clipping needed
-        sa.append(triangles, Triangle{{p0, p1, p2}, {v0, v1, v2}, image})
+        append(&_ctx.triangle_cache, Triangle{{v0^, v1^, v2^}, image})
     }
 
-    clip1 :: proc "contextless" (triangle: Triangle, output: ^Triangle_Buffer) {
-        p0, p1, p2 := expand_values(triangle.positions) // assume 0 and 1 violates
+    clip1 :: #force_inline proc(triangle: Triangle) {
+
+        p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
         v0, v1, v2 := expand_values(triangle.vertices)
 
         alphaA := -p0.z / (p1.z - p0.z)
         alphaB := -p0.z / (p2.z - p0.z)
 
-        pA := la.lerp(p0, p1, alphaA)
-        pB := la.lerp(p0, p2, alphaB)
-
         vA := interpolate_vertex(v0, v1, alphaA)
         vB := interpolate_vertex(v0, v2, alphaB)
 
-        sa.append(output, Triangle{{pA, p1, p2}, {vA, v1, v2}, triangle.image})
-        sa.append(output, Triangle{{pB, pA, p2}, {vB, vA, v2}, triangle.image})
+        append(&_ctx.triangle_cache, Triangle{{vA, v1, v2}, triangle.image})
+        append(&_ctx.triangle_cache, Triangle{{vB, vA, v2}, triangle.image})
     }
 
-    clip2 :: proc "contextless" (triangle: Triangle, output: ^Triangle_Buffer) {
-        p0, p1, p2 := expand_values(triangle.positions) // assume 0 violates
+    clip2 :: #force_inline proc(triangle: Triangle) {
+
+        p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
         v0, v1, v2 := expand_values(triangle.vertices)
 
         alpha0 := -p0.z / (p2.z - p0.z)
         alpha1 := -p1.z / (p2.z - p1.z)
 
-        p0 = la.lerp(p0, p2, alpha0)
-        p1 = la.lerp(p1, p2, alpha1)
-
         v0 = interpolate_vertex(v0, v2, alpha0)
         v1 = interpolate_vertex(v1, v2, alpha1)
 
-        sa.append(output, Triangle{{p0, p1, p2}, {v0, v1, v2}, triangle.image})
+        append(&_ctx.triangle_cache, Triangle{{v0, v1, v2}, triangle.image})
     }
 
-    interpolate_vertex :: proc "contextless" (a, b: Triangle_Vertex, t: f32) -> (c: Triangle_Vertex) {
+    interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
+        c.position = la.lerp(a.position, b.position, t)
         c.normal = la.lerp(a.normal, b.normal, t)
         c.uv = la.lerp(a.uv, b.uv, t)
         return
-    }
-
-    transform_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
-        clip_position.xyz = vertex.position
-        clip_position.w = 1.0
-        return transform * clip_position
     }
 }
 
@@ -285,33 +281,37 @@ set_debug_text :: proc(text: string) {
     _ctx.debug_text = text
 }
 
+@(private)
+VS_Out :: struct {
+    position: Vector4, // gl_Position
+    normal:   Vector3,
+    uv:       Vector2,
+}
+
 // FS_In
 @(private)
 Triangle :: struct {
-    positions: [3]Vector4,
-    vertices:  [3]Triangle_Vertex,
-    image:     ^Image,
-}
-
-// VS_Out
-@(private)
-Triangle_Vertex :: struct {
-    normal: Vector3,
-    uv:     Vector2,
+    vertices: [3]VS_Out,
+    image:    ^Image,
 }
 
 @(private)
 _ctx: struct {
-    debug_text:    string,
-    framebuffer:   Framebuffer,
-    renderer:      Renderer,
-    toggles:       bit_set[Toggle],
-    sun_direction: Vector3,
-    stats:         struct {
-        triangle_count: int,
+    debug_text:     string,
+    framebuffer:    Framebuffer,
+    renderer:       Renderer,
+    toggles:        bit_set[Toggle],
+    sun_direction:  Vector3,
+    stats:          struct {
+        rasterization_duration: time.Duration,
+        vertex_start_time:      time.Time,
+        vertex_duration:        time.Duration,
+        triangle_count:         int,
     },
-    pool:          thread.Pool,
-    wait_group:    sync.Wait_Group,
+    vertex_cache:   [dynamic]VS_Out,
+    triangle_cache: [dynamic]Triangle,
+    pool:           thread.Pool,
+    wait_group:     sync.Wait_Group,
 } = {
     toggles       = {.Backface_Culling, .Multithreading},
     sun_direction = la.normalize(Vector3{1, 3, -2}),
@@ -344,7 +344,7 @@ compute_triangle_bounds :: proc "contextless" (
     r_min, r_max: Vector2i,
 ) {
 
-    p0, p1, p2 := expand_values(triangle.positions)
+    p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
 
     // Find triangle bounds...
     r_min = la.array_cast(la.min(p0.xy, p1.xy, p2.xy), int)

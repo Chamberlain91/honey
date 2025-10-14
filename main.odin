@@ -5,8 +5,9 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
+import "core:time"
 
-RESOLUTION_FACTOR :: 2 // 4 = 1080p
+RESOLUTION_FACTOR :: 4 // 4 = 1080p
 SCREEN_W :: 480 * RESOLUTION_FACTOR
 SCREEN_H :: 270 * RESOLUTION_FACTOR
 
@@ -15,7 +16,7 @@ PITCH_LIMIT :: (math.PI / 2) * 0.9
 main :: proc() {
 
     // Initialize window.
-    honey.initalize(SCREEN_W, SCREEN_H, "Honey Software Renderer", scale = 4 / RESOLUTION_FACTOR)
+    honey.initalize(SCREEN_W, SCREEN_H, "Honey Software Renderer", scale = 4 / RESOLUTION_FACTOR, target_fps = -1)
     defer honey.shutdown()
 
     // Load the character mesh.
@@ -58,27 +59,30 @@ main :: proc() {
             la.matrix4_perspective_f32(math.PI / 2, honey.get_framebuffer_aspect(), 0.1, 60.0) *
             la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
+        status := fmt.tprintf(
+            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvert: {}\nfrag: {}",
+            honey.get_toggle(.Backface_Culling),
+            !honey.get_toggle(.Disable_SIMD),
+            honey.get_toggle(.Multithreading),
+            honey.get_triangle_count(),
+            honey.get_vert_duration(),
+            honey.get_frag_duration(),
+        )
+        honey.set_debug_text(status)
+
         honey.begin_rendering()
         {
             // Draw the floor quad.
-            honey.draw_mesh(floor_quad, &character_image, camera_matrix)
+            honey.draw_mesh_indexed(floor_quad, &character_image, camera_matrix)
 
             // Draw an array of character models.
             for y: f32 = -15; y <= 15; y += 5.0 {
                 for x: f32 = -15; x <= 15; x += 5.0 {
                     transform := la.matrix4_translate_f32({x, x * 0.5, y})
-                    honey.draw_mesh(character_mesh, &character_image, camera_matrix * transform)
+                    honey.draw_mesh_indexed(character_mesh, &character_image, camera_matrix * transform)
                 }
             }
         }
-        status := fmt.tprintf(
-            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}",
-            honey.get_toggle(.Backface_Culling),
-            !honey.get_toggle(.Disable_SIMD),
-            honey.get_toggle(.Multithreading),
-            honey.get_triangle_count(),
-        )
-        honey.set_debug_text(status)
         honey.end_rendering()
 
         if !honey.is_cursor_visible() {

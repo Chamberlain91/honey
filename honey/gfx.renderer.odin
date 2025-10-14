@@ -15,15 +15,14 @@ Renderer :: struct {
     count:     Size,
 }
 
-Raster_Tile_Triangle :: struct {
-    using triangle: Triangle,
-    min, max:       Vector2i,
+Raster_Tile_Material :: struct {
+    image: ^Image,
 }
 
 Raster_Tile :: struct {
     renderer:  ^Renderer,
     min, max:  Vector2i,
-    triangles: [dynamic]Raster_Tile_Triangle,
+    triangles: [dynamic]^Triangle,
     mutex:     sync.Atomic_Mutex,
 }
 
@@ -53,9 +52,9 @@ renderer_init :: proc(r: ^Renderer, tile_size: int = 64) {
 }
 
 // Submit the triangle to all tiles it touches.
-renderer_append_triangle :: proc(renderer: ^Renderer, triangle: Triangle) #no_bounds_check {
+renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
 
-    triangle_min, triangle_max := compute_triangle_bounds(triangle, 0, _ctx.framebuffer.size - 1)
+    triangle_min, triangle_max := compute_triangle_bounds(triangle^, 0, _ctx.framebuffer.size - 1)
 
     // Compute the rectangular range of overlapping tiles.
     co_min := (triangle_min) / renderer.tile_size
@@ -65,7 +64,7 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: Triangle) #no_bo
         for x in co_min.x ..< co_max.x {
             tile := &renderer.tiles[compute_index(x, y, renderer.count.x)]
             // sync.guard(&tile.mutex) // TODO: Only needed if/when parallel vertices
-            append_elem(&tile.triangles, Raster_Tile_Triangle{triangle, triangle_min, triangle_max})
+            append_elem(&tile.triangles, triangle)
         }
     }
 }
@@ -99,11 +98,7 @@ renderer_end :: proc(renderer: ^Renderer) {
 
         tile := cast(^Raster_Tile)task.data
         for triangle in pop_safe(&tile.triangles) {
-
-            // Clamp rasterization bounds to the viewport.
-            range_min := la.clamp(triangle.min, tile.min, tile.max)
-            range_max := la.clamp(triangle.max, tile.min, tile.max)
-
+            range_min, range_max := compute_triangle_bounds(triangle^, tile.min, tile.max)
             rasterize_triangle(triangle, range_min, range_max)
         }
 
@@ -112,7 +107,7 @@ renderer_end :: proc(renderer: ^Renderer) {
 }
 
 @(private)
-rasterize_triangle :: proc "contextless" (triangle: Triangle, range_min, range_max: [2]int) #no_bounds_check {
+rasterize_triangle :: proc "contextless" (triangle: ^Triangle, range_min, range_max: [2]int) #no_bounds_check {
 
     // Render the triangle!
     if !get_toggle(.Disable_SIMD) && simd.HAS_HARDWARE_SIMD {
@@ -124,11 +119,11 @@ rasterize_triangle :: proc "contextless" (triangle: Triangle, range_min, range_m
 
 @(private = "file")
 rasterize_triangle_normal :: proc "contextless" (
-    triangle: Triangle,
+    triangle: ^Triangle,
     triangle_min, triangle_max: [2]int,
 ) #no_bounds_check {
 
-    v0, v1, v2 := expand_values(triangle.positions)
+    v0, v1, v2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
     a, b, c := expand_values(triangle.vertices)
 
     // Precompuse inverse area to optimize interpolation.
@@ -205,12 +200,12 @@ rasterize_triangle_normal :: proc "contextless" (
 
 @(private = "file")
 rasterize_triangle_simd :: proc "contextless" (
-    triangle: Triangle,
+    triangle: ^Triangle,
     triangle_min, triangle_max: Vector2i,
 ) #no_bounds_check {
 
-    v0, v1, v2 := expand_values(triangle.positions)
-    a, b, c := expand_values(triangle.vertices)
+    a, b, c := triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]
+    v0, v1, v2 := a.position, b.position, c.position
 
     STEP_SIZES :: (#simd[4]f32){0, 1, 2, 3}
 
