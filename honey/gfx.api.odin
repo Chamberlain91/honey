@@ -97,7 +97,7 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
     }
 
     // Each frame will have a new triangle list.
-    clear(&_ctx.triangle_cache)
+    clear(&_ctx.triangles)
 }
 
 // Ends rendering, flushing the framebuffer to the screen.
@@ -105,13 +105,14 @@ end_rendering :: proc() {
 
     // Vertex processing stage is now 'complete'.
     _ctx.stats.vertex_duration = time.since(_ctx.stats.vertex_start_time)
-    rasterization_start_time := time.now()
 
     // Count the number of triangles drawn.
-    _ctx.stats.triangle_count += len(_ctx.triangle_cache)
+    _ctx.stats.triangle_count += len(_ctx.triangles)
+
+    dispatch_start_time := time.now()
 
     // Draw each clipped triangle.
-    for &tri in &_ctx.triangle_cache {
+    for &tri in &_ctx.triangles {
 
         // Map the triangle to the viewport (NDC -> Viewport).
         for &v in tri.vertices {
@@ -138,9 +139,20 @@ end_rendering :: proc() {
         }
     }
 
-    _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
+    _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
 
-    dispatch_rasterization_tasks(&_ctx.renderer)
+    if get_toggle(.Multithreading) {
+
+        rasterization_start_time := time.now()
+        dispatch_rasterization_tasks(&_ctx.renderer)
+        _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
+
+    } else {
+
+        // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
+        _ctx.stats.rasterization_duration = _ctx.stats.dispatch_duration
+        _ctx.stats.dispatch_duration = 0
+    }
 
     window_flush_content()
 }
@@ -169,7 +181,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
     }
 
     // Process each triangle.
-    reserve(&_ctx.triangle_cache, len(_ctx.triangle_cache) + (len(mesh.indices) / 3))
+    reserve(&_ctx.triangles, len(_ctx.triangles) + (len(mesh.indices) / 3))
     for i := 0; i < len(mesh.indices); i += 3 {
         a := &_ctx.vertex_cache[mesh.indices[i + 0]]
         b := &_ctx.vertex_cache[mesh.indices[i + 2]]
@@ -248,7 +260,7 @@ process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
         clip1({{v2^, v0^, v1^}, image})
     } else {
         // No clipping needed
-        append(&_ctx.triangle_cache, Triangle{{v0^, v1^, v2^}, image})
+        append(&_ctx.triangles, Triangle{{v0^, v1^, v2^}, image})
     }
 
     clip1 :: #force_inline proc(triangle: Triangle) {
@@ -262,8 +274,8 @@ process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
         vA := interpolate_vertex(v0, v1, alphaA)
         vB := interpolate_vertex(v0, v2, alphaB)
 
-        append(&_ctx.triangle_cache, Triangle{{vA, v1, v2}, triangle.image})
-        append(&_ctx.triangle_cache, Triangle{{vB, vA, v2}, triangle.image})
+        append(&_ctx.triangles, Triangle{{vA, v1, v2}, triangle.image})
+        append(&_ctx.triangles, Triangle{{vB, vA, v2}, triangle.image})
     }
 
     clip2 :: #force_inline proc(triangle: Triangle) {
@@ -277,7 +289,7 @@ process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
         v0 = interpolate_vertex(v0, v2, alpha0)
         v1 = interpolate_vertex(v1, v2, alpha1)
 
-        append(&_ctx.triangle_cache, Triangle{{v0, v1, v2}, triangle.image})
+        append(&_ctx.triangles, Triangle{{v0, v1, v2}, triangle.image})
     }
 
     interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
@@ -309,22 +321,22 @@ Triangle :: struct {
 
 @(private)
 _ctx: struct {
-    debug_text:     string,
-    framebuffer:    Framebuffer,
-    renderer:       Renderer,
-    toggles:        bit_set[Toggle],
-    sun_direction:  Vector3,
-    stats:          struct {
+    debug_text:    string,
+    framebuffer:   Framebuffer,
+    renderer:      Renderer,
+    toggles:       bit_set[Toggle],
+    sun_direction: Vector3,
+    stats:         struct {
         dispatch_duration:      time.Duration,
         rasterization_duration: time.Duration,
         vertex_start_time:      time.Time,
         vertex_duration:        time.Duration,
         triangle_count:         int,
     },
-    vertex_cache:   [dynamic]VS_Out,
-    triangle_cache: [dynamic]Triangle,
-    pool:           thread.Pool,
-    wait_group:     sync.Wait_Group,
+    vertex_cache:  [dynamic]VS_Out,
+    triangles:     [dynamic]Triangle,
+    pool:          thread.Pool,
+    wait_group:    sync.Wait_Group,
 } = {
     toggles       = {.Backface_Culling, .Multithreading},
     sun_direction = la.normalize(Vector3{1, 3, -2}),

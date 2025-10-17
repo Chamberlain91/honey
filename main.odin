@@ -18,21 +18,23 @@ main :: proc() {
     defer honey.shutdown()
 
     // Load the character mesh.
-    model := honey.load_wavefront_model("assets/sponza.obj", flip_uv = true)
+    model := honey.load_wavefront_model("assets/sponza.obj")
+    character := honey.load_wavefront_model("assets/NexoITCH.obj")
 
     v_min, v_max: honey.Vector3 = max(f32), min(f32)
     for mesh in model.meshes {
         for &v in mesh.vertices {
-            v.position *= 0.01
+            v.position *= 0.01 // scale down sponza.obj
             v_min = la.min(v.position, v_min)
             v_max = la.max(v.position, v_max)
         }
     }
     fmt.printfln("Model ranges from: {} to {} (size {})", v_min, v_max, v_max - v_min)
 
-    camera_position: honey.Vector3 = {-15, 15, 15}
-    camera_heading: f32 = -0.69
-    camera_pitch: f32 = -0.61
+    // default position within sponza.obj
+    camera_position: honey.Vector3 = {-10.8, 0.57, 1.0}
+    camera_heading: f32 = -0.56
+    camera_pitch: f32 = 0.419
 
     // Main loop.
     main_loop: for honey.is_window_open() {
@@ -72,6 +74,7 @@ main :: proc() {
 
         honey.begin_rendering()
         {
+            honey.draw_model(character, camera_matrix)
             honey.draw_model(model, camera_matrix)
         }
         honey.end_rendering()

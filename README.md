@@ -8,8 +8,10 @@ odin run . -o:speed -define:DEV_BUILD=true
 
 **Please note**: The optimized build is quite necessary since this is a software renderer and heavy on the cpu.
 
-## Example
+## Screenshot
 
-![alt text](preview.png)
+![alt text](preview.jpg)
 
-3D Model is from [itch.io](https://firukono.itch.io/free-anime-maiden-3d).
+## Resources
+- Character 3D Model is from [itch.io](https://firukono.itch.io/free-anime-maiden-3d).
+- Sponza from [NCCA](https://github.com/NCCA/Sponza).

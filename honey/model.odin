@@ -26,7 +26,7 @@ destroy_model :: proc(model: Model) {
 
 // Parse a Wavefront `*.obj` model format. This is rudementary!
 // This does not consider `*.mtl` files nor submeshes, smoothing groups, or other features.
-load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv := false) -> Model {
+load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv := true) -> Model {
 
     positions: [dynamic]Vector3
     defer delete(positions)

@@ -74,9 +74,6 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_b
 // Blocks to ensure all rendering of tiles have completed.
 dispatch_rasterization_tasks :: proc(renderer: ^Renderer) {
 
-    dispatch_start_time := time.now()
-    defer _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
-
     n_tiles: int
     for &tile in renderer.tiles {
         n_tiles += cast(int)(len(tile.triangles) > 0)
