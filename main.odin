@@ -1,11 +1,9 @@
 package honey_app
 
 import "./honey"
-import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
-import "core:time"
 
 RESOLUTION_FACTOR :: 4 // 4 = 1080p
 SCREEN_W :: 480 * RESOLUTION_FACTOR
@@ -20,18 +18,17 @@ main :: proc() {
     defer honey.shutdown()
 
     // Load the character mesh.
-    character_image := honey.image_load("assets/Nexo_Texture.png")
-    character_mesh := honey.parse_wavefront_mesh(#load("assets/NexoITCH.obj", string), flip_uv = true)
+    model := honey.load_wavefront_model("assets/sponza.obj", flip_uv = true)
 
-    floor_quad: honey.Mesh = {
-        vertices = {
-            honey.Vertex{position = {-30, 0, -30}, uv = {0, 0}, normal = {0, 1, 0}},
-            honey.Vertex{position = {+30, 0, -30}, uv = {0, 1}, normal = {0, 1, 0}},
-            honey.Vertex{position = {+30, 0, +30}, uv = {1, 1}, normal = {0, 1, 0}},
-            honey.Vertex{position = {-30, 0, +30}, uv = {1, 0}, normal = {0, 1, 0}},
-        },
-        indices  = {0, 1, 2, 0, 2, 3},
+    v_min, v_max: honey.Vector3 = max(f32), min(f32)
+    for mesh in model.meshes {
+        for &v in mesh.vertices {
+            v.position *= 0.01
+            v_min = la.min(v.position, v_min)
+            v_max = la.max(v.position, v_max)
+        }
     }
+    fmt.printfln("Model ranges from: {} to {} (size {})", v_min, v_max, v_max - v_min)
 
     camera_position: honey.Vector3 = {-15, 15, 15}
     camera_heading: f32 = -0.69
@@ -54,34 +51,28 @@ main :: proc() {
             math.sin(camera_pitch),
             math.sin(camera_heading) * math.cos(camera_pitch),
         }
+        camera_right := la.cross(camera_dir, honey.Vector3{0, 1, 0})
+        camera_up := la.cross(camera_right, camera_dir)
 
         camera_matrix :=
             la.matrix4_perspective_f32(math.PI / 2, honey.get_framebuffer_aspect(), 0.1, 60.0) *
             la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
         status := fmt.tprintf(
-            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvert: {}\nfrag: {}",
+            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvertex: {}\ndispatch: {}\nraster: {}",
             honey.get_toggle(.Backface_Culling),
             !honey.get_toggle(.Disable_SIMD),
             honey.get_toggle(.Multithreading),
             honey.get_triangle_count(),
-            honey.get_vert_duration(),
-            honey.get_frag_duration(),
+            honey.get_vertex_duration(),
+            honey.get_dispatch_duration(),
+            honey.get_raster_duration(),
         )
         honey.set_debug_text(status)
 
         honey.begin_rendering()
         {
-            // Draw the floor quad.
-            honey.draw_mesh_indexed(floor_quad, &character_image, camera_matrix)
-
-            // Draw an array of character models.
-            for y: f32 = -15; y <= 15; y += 5.0 {
-                for x: f32 = -15; x <= 15; x += 5.0 {
-                    transform := la.matrix4_translate_f32({x, x * 0.5, y})
-                    honey.draw_mesh_indexed(character_mesh, &character_image, camera_matrix * transform)
-                }
-            }
+            honey.draw_model(model, camera_matrix)
         }
         honey.end_rendering()
 
@@ -91,13 +82,16 @@ main :: proc() {
             camera_pitch = clamp(camera_pitch, -PITCH_LIMIT, PITCH_LIMIT)
         }
 
-        if honey.is_key_down(.W) {
-            camera_position += camera_dir * honey.delta_time() * 5
-        }
+        move: honey.Vector3
+        if honey.is_key_down(.W) do move += camera_dir
+        if honey.is_key_down(.A) do move -= camera_right
+        if honey.is_key_down(.S) do move -= camera_dir
+        if honey.is_key_down(.D) do move += camera_right
+        if honey.is_key_down(.Q) do move -= camera_up
+        if honey.is_key_down(.E) do move += camera_up
 
-        if honey.is_key_down(.S) {
-            camera_position -= camera_dir * honey.delta_time() * 5
-        }
+        speed := (1.0 + cast(f32)cast(int)(honey.is_key_down(.LEFT_SHIFT))) * honey.delta_time() * 5
+        camera_position += la.normalize0(move) * speed
 
         // Exit when pressing escape.
         if honey.is_key_pressed(.ESCAPE) {

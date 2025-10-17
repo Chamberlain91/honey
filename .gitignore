@@ -1,6 +1,7 @@
 # Windows build artifacts
 *.exe
 *.pdb
+*.rdi
 
 # Linux build artifacts
 *.out

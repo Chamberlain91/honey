@@ -53,12 +53,16 @@ get_triangle_count :: proc() -> int {
     return _ctx.stats.triangle_count
 }
 
-get_vert_duration :: proc() -> time.Duration {
+get_vertex_duration :: proc() -> time.Duration {
     return _ctx.stats.vertex_duration
 }
 
-get_frag_duration :: proc() -> time.Duration {
+get_raster_duration :: proc() -> time.Duration {
     return _ctx.stats.rasterization_duration
+}
+
+get_dispatch_duration :: proc() -> time.Duration {
+    return _ctx.stats.dispatch_duration
 }
 
 // TODO: Better name
@@ -92,7 +96,8 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
         vertex_start_time = time.now(),
     }
 
-    renderer_begin(&_ctx.renderer)
+    // Each frame will have a new triangle list.
+    clear(&_ctx.triangle_cache)
 }
 
 // Ends rendering, flushing the framebuffer to the screen.
@@ -132,15 +137,22 @@ end_rendering :: proc() {
             rasterize_triangle(&tri, compute_triangle_bounds(tri, 0, _ctx.framebuffer.size - 1))
         }
     }
-    renderer_end(&_ctx.renderer)
 
     _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
 
-    clear(&_ctx.triangle_cache)
+    dispatch_rasterization_tasks(&_ctx.renderer)
+
     window_flush_content()
 }
 
-// Draws the specified mesh.
+// Draws the specified model.
+draw_model :: proc(model: Model, transform: Matrix) #no_bounds_check {
+    for &x in soa_zip(mesh = model.meshes, image = model.textures) {
+        draw_mesh_indexed(x.mesh, &x.image, transform)
+    }
+}
+
+// Draws the specified mesh texture image.
 draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
 
     // We need to clear the vertex cache for each mesh, since the transform will be different.
@@ -303,6 +315,7 @@ _ctx: struct {
     toggles:        bit_set[Toggle],
     sun_direction:  Vector3,
     stats:          struct {
+        dispatch_duration:      time.Duration,
         rasterization_duration: time.Duration,
         vertex_start_time:      time.Time,
         vertex_duration:        time.Duration,

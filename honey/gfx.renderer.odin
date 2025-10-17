@@ -1,10 +1,12 @@
 #+private
 package honey
 
+import "core:fmt"
 import la "core:math/linalg"
 import "core:simd"
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 @(private)
 SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
@@ -69,16 +71,21 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_b
     }
 }
 
-renderer_begin :: proc(renderer: ^Renderer) {
-    // Nothing
-}
-
 // Blocks to ensure all rendering of tiles have completed.
-renderer_end :: proc(renderer: ^Renderer) {
+dispatch_rasterization_tasks :: proc(renderer: ^Renderer) {
+
+    dispatch_start_time := time.now()
+    defer _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
+
+    n_tiles: int
+    for &tile in renderer.tiles {
+        n_tiles += cast(int)(len(tile.triangles) > 0)
+    }
 
     // Schedule rendering each tile.
-    sync.wait_group_add(&_ctx.wait_group, len(renderer.tiles))
+    sync.wait_group_add(&_ctx.wait_group, n_tiles)
     for &tile in renderer.tiles {
+        if len(tile.triangles) == 0 do continue
         thread.pool_add_task(&_ctx.pool, {}, process_tile, &tile)
     }
 
@@ -87,7 +94,7 @@ renderer_end :: proc(renderer: ^Renderer) {
 
     // At this point, all triangles in the tile need to be processed.
     for &tile in renderer.tiles {
-        assert(len(tile.triangles) == 0)
+        fmt.assertf(len(tile.triangles) == 0, "Tile must have zero triangles, but had {}", len(tile.triangles))
     }
 
     process_tile :: proc(task: thread.Task) {
@@ -97,12 +104,13 @@ renderer_end :: proc(renderer: ^Renderer) {
         context.allocator = {}
 
         tile := cast(^Raster_Tile)task.data
-        for triangle in pop_safe(&tile.triangles) {
+        for triangle in tile.triangles {
             range_min, range_max := compute_triangle_bounds(triangle^, tile.min, tile.max)
             rasterize_triangle(triangle, range_min, range_max)
         }
 
         sync.wait_group_done(&_ctx.wait_group)
+        clear(&tile.triangles)
     }
 }
 
@@ -180,6 +188,9 @@ rasterize_triangle_normal :: proc "contextless" (
             // ---- FRAGMENT SHADER BEGIN ---
 
             pixel := image_sample(triangle.image^, fragment_uv)
+            if pixel.a == 0 {
+                continue // alphg clipping (discard pixel)
+            }
 
             brightness := max(0.0, la.dot(fragment_normal, _ctx.sun_direction))
             pixel = mix_color(0, pixel, 0.25 + (brightness * 0.75))
@@ -295,6 +306,7 @@ rasterize_triangle_simd :: proc "contextless" (
             // ---- FRAGMENT SHADER BEGIN ---
 
             R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(triangle.image^, U, V))
+            write_mask = write_mask & simd.lanes_ne(A, 0) // alphg clipping (discard pixel)
 
             brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, _ctx.sun_direction)) * 0.75)
 
