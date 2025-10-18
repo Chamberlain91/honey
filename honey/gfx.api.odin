@@ -106,47 +106,11 @@ end_rendering :: proc() {
     // Count the number of triangles drawn.
     _ctx.stats.triangle_count += len(_ctx.renderer.triangles)
 
-    dispatch_start_time := time.now()
+    // Process all triangles.
+    flush_renderer(&_ctx.renderer)
 
-    // Draw each clipped triangle.
-    for &tri in &_ctx.renderer.triangles {
-
-        // Map the triangle to the viewport (NDC -> Viewport).
-        for &v in tri.vertices {
-
-            // Do the "perspective divide"
-            v.position.w = 1.0 / v.position.w
-            v.position.xyz *= v.position.w
-
-            // NDC -> Viewport
-            v.position.xy = (v.position.xy + 1.0) / 2.0
-            v.position.x *= cast(f32)_ctx.framebuffer.width
-            v.position.y *= cast(f32)_ctx.framebuffer.height
-        }
-
-        if get_toggle(.Multithreading) {
-
-            // Submit triangle to the tiled region.
-            renderer_append_triangle(&_ctx.renderer, &tri)
-
-        } else {
-
-            // Render the triangle, directly.
-            rasterize_triangle(&tri, compute_triangle_bounds(tri, 0, _ctx.framebuffer.size - 1))
-        }
-    }
-
-    _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
-
-    if get_toggle(.Multithreading) {
-
-        rasterization_start_time := time.now()
-        dispatch_rasterization_tasks(&_ctx.renderer)
-        _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
-
-    } else {
-
-        // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
+    // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
+    if !get_toggle(.Multithreading) {
         _ctx.stats.rasterization_duration = _ctx.stats.dispatch_duration
         _ctx.stats.dispatch_duration = 0
     }
@@ -164,9 +128,6 @@ draw_model :: proc(model: Model, transform: Matrix) #no_bounds_check {
 // Draws the specified mesh texture image.
 draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
 
-    // We need to clear the vertex cache for each mesh, since the transform will be different.
-    clear(&_ctx.vertex_cache)
-
     // Transform the entire mesh vertex set.
     resize(&_ctx.vertex_cache, len(mesh.vertices))
     for v, i in mesh.vertices {
@@ -179,9 +140,9 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
     // Process each triangle.
     for i := 0; i < len(mesh.indices); i += 3 {
-        a := &_ctx.vertex_cache[mesh.indices[i + 0]]
-        b := &_ctx.vertex_cache[mesh.indices[i + 2]]
-        c := &_ctx.vertex_cache[mesh.indices[i + 1]]
+        a := _ctx.vertex_cache[mesh.indices[i + 0]]
+        b := _ctx.vertex_cache[mesh.indices[i + 2]]
+        c := _ctx.vertex_cache[mesh.indices[i + 1]]
         process_triangle(a, b, c, image)
     }
 
@@ -193,7 +154,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 }
 
 @(private)
-process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
+process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -243,23 +204,23 @@ process_triangle :: proc(v0, v1, v2: ^VS_Out, image: ^Image) #no_bounds_check {
 
     if p0.z < 0 {
         if p1.z < 0 {
-            clip2({{v0^, v1^, v2^}, image})
+            clip2({{v0, v1, v2}, image})
         } else if p2.z < 0 {
-            clip2({{v0^, v2^, v1^}, image})
+            clip2({{v0, v2, v1}, image})
         } else {
-            clip1({{v0^, v1^, v2^}, image})
+            clip1({{v0, v1, v2}, image})
         }
     } else if p1.z < 0 {
         if p2.z < 0 {
-            clip2({{v1^, v2^, v0^}, image})
+            clip2({{v1, v2, v0}, image})
         } else {
-            clip1({{v1^, v0^, v2^}, image})
+            clip1({{v1, v0, v2}, image})
         }
     } else if p2.z < 0 {
-        clip1({{v2^, v0^, v1^}, image})
+        clip1({{v2, v0, v1}, image})
     } else {
         // No clipping needed
-        append(&_ctx.renderer.triangles, Triangle{{v0^, v1^, v2^}, image})
+        append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, image})
     }
 
     clip1 :: #force_inline proc(triangle: Triangle) {
@@ -359,7 +320,7 @@ allocate_framebuffer :: proc(width, height: int) -> Framebuffer {
 }
 
 @(private)
-compute_triangle_bounds :: proc "contextless" (
+compute_triangle_bounds :: #force_inline proc "contextless" (
     triangle: Triangle,
     viewport_min, viewport_max: Vector2i,
 ) -> (

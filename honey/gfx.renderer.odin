@@ -6,6 +6,7 @@ import la "core:math/linalg"
 import "core:simd"
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 @(private)
 SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
@@ -54,70 +55,116 @@ create_renderer :: proc(tile_size: int) -> (renderer: Renderer) {
     return
 }
 
-// Submit the triangle to all tiles it touches.
-renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
+flush_renderer :: proc(renderer: ^Renderer) {
 
-    triangle_min, triangle_max := compute_triangle_bounds(triangle^, 0, _ctx.framebuffer.size - 1)
+    dispatch_start_time := time.now()
 
-    // Compute the rectangular range of overlapping tiles.
-    co_min := (triangle_min) / renderer.tile_size
-    co_max := (triangle_max + (renderer.tile_size - 1)) / renderer.tile_size
+    // Process all triangles submit this frame.
+    for &triangle in renderer.triangles {
 
-    for y in co_min.y ..< co_max.y {
-        for x in co_min.x ..< co_max.x {
-            tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
-            append_elem(&tile.triangles, triangle)
+        // Map the triangle to the viewport (NDC -> Viewport).
+        for &vertex in triangle.vertices {
+
+            // Do the "perspective divide"
+            vertex.position.w = 1.0 / vertex.position.w
+            vertex.position.xyz *= vertex.position.w
+
+            // NDC -> Viewport
+            vertex.position.xy = (vertex.position.xy + 1.0) / 2.0
+            vertex.position.x *= cast(f32)_ctx.framebuffer.width
+            vertex.position.y *= cast(f32)_ctx.framebuffer.height
+        }
+
+        triangle_min, triangle_max := compute_triangle_bounds(triangle, 0, _ctx.framebuffer.size - 1)
+
+        if get_toggle(.Multithreading) {
+
+            // Submit triangle to the tiled region.
+            submit_to_tiles(renderer, &triangle, triangle_min, triangle_max)
+
+        } else {
+
+            // Render the triangle, directly.
+            rasterize_triangle(&triangle, triangle_min, triangle_max)
         }
     }
-}
 
-// Blocks to ensure all rendering of tiles have completed.
-dispatch_rasterization_tasks :: proc(renderer: ^Renderer) {
+    dispatch_tiles(&_ctx.renderer, dispatch_start_time)
 
-    Task_Info :: struct {
+    submit_to_tiles :: proc(
         renderer: ^Renderer,
-        tile:     ^Raster_Tile,
-    }
+        triangle: ^Triangle,
+        triangle_min, triangle_max: Vector2i,
+    ) #no_bounds_check {
 
-    n_tiles: int
-    for &tile in renderer.tiles {
-        n_tiles += cast(int)(len(tile.triangles) > 0)
-    }
+        // Compute the rectangular range of overlapping tiles.
+        co_min := (triangle_min) / renderer.tile_size
+        co_max := (triangle_max + (renderer.tile_size - 1)) / renderer.tile_size
 
-    // Schedule rendering each tile.
-    sync.wait_group_add(&renderer.wait_group, n_tiles)
-    for &tile in renderer.tiles {
-        if len(tile.triangles) == 0 do continue
-
-        info := Task_Info {
-            renderer = renderer,
-            tile     = &tile,
+        for y in co_min.y ..< co_max.y {
+            for x in co_min.x ..< co_max.x {
+                tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
+                append_elem(&tile.triangles, triangle)
+            }
         }
-        thread.pool_add_task(&_ctx.pool, {}, process_tile, new_clone(info, context.temp_allocator))
     }
 
-    // Wait for all tiles to complete.
-    sync.wait_group_wait(&renderer.wait_group)
+    // Blocks to ensure all rendering of tiles have completed.
+    dispatch_tiles :: proc(renderer: ^Renderer, dispatch_start_time: time.Time) {
 
-    // At this point, all triangles in the tile need to be processed.
-    for &tile in renderer.tiles {
-        fmt.assertf(len(tile.triangles) == 0, "Tile must have zero triangles, but had {}", len(tile.triangles))
-    }
-
-    process_tile :: proc(task: thread.Task) {
-
-        // Rasterization work should be contextless.
-        context.temp_allocator = {}
-        context.allocator = {}
-
-        info := cast(^Task_Info)task.data
-        for triangle in info.tile.triangles {
-            range_min, range_max := compute_triangle_bounds(triangle^, info.tile.min, info.tile.max)
-            rasterize_triangle(triangle, range_min, range_max)
+        Task_Info :: struct {
+            renderer: ^Renderer,
+            tile:     ^Raster_Tile,
         }
 
-        sync.wait_group_done(&info.renderer.wait_group)
-        clear(&info.tile.triangles)
+        n_tiles: int
+        for &tile in renderer.tiles {
+            n_tiles += cast(int)(len(tile.triangles) > 0)
+        }
+
+        // Schedule rendering each tile.
+        sync.wait_group_add(&renderer.wait_group, n_tiles)
+        for &tile in renderer.tiles {
+            if len(tile.triangles) == 0 do continue
+
+            info := Task_Info {
+                renderer = renderer,
+                tile     = &tile,
+            }
+            thread.pool_add_task(&_ctx.pool, {}, process_tile, new_clone(info, context.temp_allocator))
+        }
+
+        // Record the time since start of submit and dispatch of tiles.
+        _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
+
+        rasterization_start_time := time.now()
+
+        // Wait for all tiles to complete.
+        sync.wait_group_wait(&renderer.wait_group)
+
+        // Record the time spend waiting for rasterization tasks.
+        _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
+
+        // At this point, all triangles in the tile need to be processed.
+        for &tile in renderer.tiles {
+            fmt.assertf(len(tile.triangles) == 0, "Tile must have zero triangles, but had {}", len(tile.triangles))
+        }
+
+        process_tile :: proc(task: thread.Task) {
+
+            // Rasterization work should be contextless.
+            context.temp_allocator = {}
+            context.allocator = {}
+
+            info := cast(^Task_Info)task.data
+            for triangle in info.tile.triangles {
+                range_min, range_max := compute_triangle_bounds(triangle^, info.tile.min, info.tile.max)
+                rasterize_triangle(triangle, range_min, range_max)
+            }
+
+            sync.wait_group_done(&info.renderer.wait_group)
+            clear(&info.tile.triangles)
+        }
     }
 }
 
