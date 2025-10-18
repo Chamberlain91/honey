@@ -2,10 +2,9 @@ package honey
 
 import sa "core:container/small_array"
 import "core:fmt"
-import "core:mem"
+import la "core:math/linalg"
 import "core:os"
 import "core:path/filepath"
-import "core:slice"
 import "core:strconv"
 import "core:strings"
 
@@ -26,7 +25,7 @@ destroy_model :: proc(model: Model) {
 
 // Parse a Wavefront `*.obj` model format. This is rudementary!
 // This does not consider `*.mtl` files nor submeshes, smoothing groups, or other features.
-load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv := true) -> Model {
+load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32 = 1.0, flip_uv := true) -> Model {
 
     positions: [dynamic]Vector3
     defer delete(positions)
@@ -100,7 +99,7 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv :=
             x := strconv.parse_f32(parts[1]) or_else 0
             y := strconv.parse_f32(parts[2]) or_else 0
             z := strconv.parse_f32(parts[3]) or_else 0
-            append(&positions, Vector3{x, y, z})
+            append(&positions, Vector3{x, y, z} * scale)
 
         // PARSING NORMALS
         case "vn":
@@ -202,6 +201,8 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv :=
         meshes   = meshes[:],
     }
 
+    debug_model_stats(model, file)
+
     return model
 
     Mesh_Builder :: struct {
@@ -215,6 +216,22 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, flip_uv :=
             indices  = builder.indices[:],
         }
         return mesh
+    }
+
+    @(disabled = !DEV_BUILD)
+    debug_model_stats :: proc(model: Model, name: string) {
+
+        v_min, v_max: Vector3 = max(f32), min(f32)
+        for mesh in model.meshes {
+            for v in mesh.vertices {
+                v_min = la.min(v.position, v_min)
+                v_max = la.max(v.position, v_max)
+            }
+        }
+
+        fmt.printfln("[INFO] Model '{}'", name)
+        fmt.printfln("[INFO] - min: {: 7.3f}", v_min)
+        fmt.printfln("[INFO] - max: {: 7.3f}", v_max)
     }
 }
 

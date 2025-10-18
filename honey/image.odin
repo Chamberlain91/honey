@@ -1,6 +1,5 @@
 package honey
 
-import "base:runtime"
 import "core:bytes"
 import "core:fmt"
 import "core:image/png"

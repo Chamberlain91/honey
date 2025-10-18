@@ -6,46 +6,47 @@ import la "core:math/linalg"
 import "core:simd"
 import "core:sync"
 import "core:thread"
-import "core:time"
 
 @(private)
 SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
 
 Renderer :: struct {
-    tile_size: int,
-    tiles:     []Raster_Tile,
-    count:     Size,
-}
-
-Raster_Tile_Material :: struct {
-    image: ^Image,
+    // Size of the tile (in pixels).
+    tile_size:  int,
+    // List of tiles contained by the renderer.
+    tiles:      []Raster_Tile,
+    // Number of tiles in each axis.
+    tile_count: Size,
+    // Triangles waiting to be dispatched (work list).
+    triangles:  [dynamic]Triangle,
+    // Wait group for dispatched tiles.
+    wait_group: sync.Wait_Group,
 }
 
 Raster_Tile :: struct {
-    renderer:  ^Renderer,
+    // Bounds of the tile (in pixels).
     min, max:  Vector2i,
+    // Work list of the tile.
     triangles: [dynamic]^Triangle,
-    mutex:     sync.Atomic_Mutex,
 }
 
-renderer_init :: proc(r: ^Renderer, tile_size: int = 64) {
+create_renderer :: proc(tile_size: int) -> (renderer: Renderer) {
 
-    r.tile_size = tile_size
-    r.count = ((_ctx.framebuffer.size + (tile_size - 1)) / tile_size)
-    r.tiles = make([]Raster_Tile, r.count.x * r.count.y)
+    renderer.tile_size = tile_size
+    renderer.tile_count = ((_ctx.framebuffer.size + (tile_size - 1)) / tile_size)
+    renderer.tiles = make([]Raster_Tile, renderer.tile_count.x * renderer.tile_count.y)
 
-    for y in 0 ..< r.count.y {
-        for x in 0 ..< r.count.x {
+    for y in 0 ..< renderer.tile_count.y {
+        for x in 0 ..< renderer.tile_count.x {
 
             r_min := Vector2i{x, y} * tile_size
             r_max := la.min(r_min + tile_size, _ctx.framebuffer.size - 1)
 
-            tile := &r.tiles[compute_index(x, y, r.count.x)]
+            tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
 
             tile^ = Raster_Tile {
-                renderer = r,
-                min      = r_min,
-                max      = r_max,
+                min = r_min,
+                max = r_max,
             }
         }
     }
@@ -64,8 +65,7 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_b
 
     for y in co_min.y ..< co_max.y {
         for x in co_min.x ..< co_max.x {
-            tile := &renderer.tiles[compute_index(x, y, renderer.count.x)]
-            // sync.guard(&tile.mutex) // TODO: Only needed if/when parallel vertices
+            tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
             append_elem(&tile.triangles, triangle)
         }
     }
@@ -74,20 +74,30 @@ renderer_append_triangle :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_b
 // Blocks to ensure all rendering of tiles have completed.
 dispatch_rasterization_tasks :: proc(renderer: ^Renderer) {
 
+    Task_Info :: struct {
+        renderer: ^Renderer,
+        tile:     ^Raster_Tile,
+    }
+
     n_tiles: int
     for &tile in renderer.tiles {
         n_tiles += cast(int)(len(tile.triangles) > 0)
     }
 
     // Schedule rendering each tile.
-    sync.wait_group_add(&_ctx.wait_group, n_tiles)
+    sync.wait_group_add(&renderer.wait_group, n_tiles)
     for &tile in renderer.tiles {
         if len(tile.triangles) == 0 do continue
-        thread.pool_add_task(&_ctx.pool, {}, process_tile, &tile)
+
+        info := Task_Info {
+            renderer = renderer,
+            tile     = &tile,
+        }
+        thread.pool_add_task(&_ctx.pool, {}, process_tile, new_clone(info, context.temp_allocator))
     }
 
     // Wait for all tiles to complete.
-    sync.wait_group_wait(&_ctx.wait_group)
+    sync.wait_group_wait(&renderer.wait_group)
 
     // At this point, all triangles in the tile need to be processed.
     for &tile in renderer.tiles {
@@ -100,14 +110,14 @@ dispatch_rasterization_tasks :: proc(renderer: ^Renderer) {
         context.temp_allocator = {}
         context.allocator = {}
 
-        tile := cast(^Raster_Tile)task.data
-        for triangle in tile.triangles {
-            range_min, range_max := compute_triangle_bounds(triangle^, tile.min, tile.max)
+        info := cast(^Task_Info)task.data
+        for triangle in info.tile.triangles {
+            range_min, range_max := compute_triangle_bounds(triangle^, info.tile.min, info.tile.max)
             rasterize_triangle(triangle, range_min, range_max)
         }
 
-        sync.wait_group_done(&_ctx.wait_group)
-        clear(&tile.triangles)
+        sync.wait_group_done(&info.renderer.wait_group)
+        clear(&info.tile.triangles)
     }
 }
 

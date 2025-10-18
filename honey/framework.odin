@@ -1,12 +1,7 @@
 package honey
 
-import "core:bytes"
 import "core:c"
 import "core:fmt"
-import "core:image/png"
-import "core:mem"
-import "core:simd"
-import "core:slice"
 import "core:strings"
 import ray "vendor:raylib"
 
@@ -41,7 +36,7 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         defer ray.UnloadImage(img)
 
         _ctx.framebuffer = allocate_framebuffer(width, height)
-        renderer_init(&_ctx.renderer)
+        _ctx.renderer = create_renderer(64)
         thread_init()
 
         texture_ = ray.LoadTextureFromImage(img)
