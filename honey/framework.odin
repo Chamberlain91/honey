@@ -35,7 +35,7 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         img := ray.GenImageColor(cast(c.int)width, cast(c.int)height, ray.RED)
         defer ray.UnloadImage(img)
 
-        _ctx.framebuffer = allocate_framebuffer(width, height)
+        _ctx.framebuffer = allocate_framebuffer({width, height})
         _ctx.renderer = create_renderer(100)
         thread_init()
 
@@ -69,7 +69,7 @@ delta_time :: proc() -> f32 {
 }
 
 // Gets the size of the window (may differ from the framebuffer size based on initialization scale).
-window_size :: proc() -> [2]int {
+window_size :: proc() -> Vector2i {
     return {cast(int)ray.GetScreenWidth(), cast(int)ray.GetScreenHeight()}
 }
 

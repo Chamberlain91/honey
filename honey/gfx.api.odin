@@ -35,7 +35,7 @@ thread_init :: proc() {
 }
 
 // Gets the size of the framebuffer (may differ from the window size based on initialization scale).
-get_framebuffer_size :: proc() -> [2]int {
+get_framebuffer_size :: proc() -> Vector2i {
     return _ctx.framebuffer.size
 }
 
@@ -204,52 +204,62 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
 
     if p0.z < 0 {
         if p1.z < 0 {
-            clip2({{v0, v1, v2}, image})
+            clip2(v0, v1, v2, image)
         } else if p2.z < 0 {
-            clip2({{v0, v2, v1}, image})
+            clip2(v0, v2, v1, image)
         } else {
-            clip1({{v0, v1, v2}, image})
+            clip1(v0, v1, v2, image)
         }
     } else if p1.z < 0 {
         if p2.z < 0 {
-            clip2({{v1, v2, v0}, image})
+            clip2(v1, v2, v0, image)
         } else {
-            clip1({{v1, v0, v2}, image})
+            clip1(v1, v0, v2, image)
         }
     } else if p2.z < 0 {
-        clip1({{v2, v0, v1}, image})
+        clip1(v2, v0, v1, image)
     } else {
-        // No clipping needed
-        append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, image})
+        // No clipping needed.
+        append_triangle(v0, v1, v2, image)
     }
 
-    clip1 :: #force_inline proc(triangle: Triangle) {
+    clip1 :: proc(v0, v1, v2: VS_Out, image: ^Image) {
+        z0, z1, z2 := v0.position.z, v1.position.z, v2.position.z
 
-        p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
-        v0, v1, v2 := expand_values(triangle.vertices)
+        vA := interpolate_vertex(v0, v1, -z0 / (z1 - z0))
+        vB := interpolate_vertex(v0, v2, -z0 / (z2 - z0))
 
-        alphaA := -p0.z / (p1.z - p0.z)
-        alphaB := -p0.z / (p2.z - p0.z)
-
-        vA := interpolate_vertex(v0, v1, alphaA)
-        vB := interpolate_vertex(v0, v2, alphaB)
-
-        append(&_ctx.renderer.triangles, Triangle{{vA, v1, v2}, triangle.image})
-        append(&_ctx.renderer.triangles, Triangle{{vB, vA, v2}, triangle.image})
+        append_triangle(vA, v1, v2, image)
+        append_triangle(vB, vA, v2, image)
     }
 
-    clip2 :: #force_inline proc(triangle: Triangle) {
+    clip2 :: proc(v0, v1, v2: VS_Out, image: ^Image) {
+        z0, z1, z2 := v0.position.z, v1.position.z, v2.position.z
 
-        p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
-        v0, v1, v2 := expand_values(triangle.vertices)
+        vA := interpolate_vertex(v0, v2, -z0 / (z2 - z0))
+        vB := interpolate_vertex(v1, v2, -z1 / (z2 - z1))
 
-        alpha0 := -p0.z / (p2.z - p0.z)
-        alpha1 := -p1.z / (p2.z - p1.z)
+        append_triangle(vA, vB, v2, image)
+    }
 
-        v0 = interpolate_vertex(v0, v2, alpha0)
-        v1 = interpolate_vertex(v1, v2, alpha1)
+    append_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) {
+        append(
+            &_ctx.renderer.triangles,
+            Triangle{{map_to_viewport(v0), map_to_viewport(v1), map_to_viewport(v2)}, image},
+        )
+    }
 
-        append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, triangle.image})
+    map_to_viewport :: proc(vertex: VS_Out) -> VS_Out {
+        vertex := vertex
+
+        // Perspective divide
+        vertex.position.w = 1.0 / vertex.position.w
+        vertex.position.xyz *= vertex.position.w
+
+        // NDC -> Viewport
+        vertex.position.xy = ((vertex.position.xy + 1.0) / 2.0) * _ctx.framebuffer.sizef
+
+        return vertex
     }
 
     interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
@@ -308,39 +318,19 @@ Framebuffer :: struct {
         using _: struct {
             width, height: int,
         },
-        size:    [2]int,
+        size:    Vector2i,
     },
+    sizef:   [2]f32,
 }
 
 @(private)
-allocate_framebuffer :: proc(width, height: int) -> Framebuffer {
-    color := mem.make_aligned([]Color, width * height, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
-    depth := mem.make_aligned([]f32, width * height, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
-    return {color = color, depth = depth, width = width, height = height}
+allocate_framebuffer :: proc(size: Vector2i) -> Framebuffer {
+    color := mem.make_aligned([]Color, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
+    depth := mem.make_aligned([]f32, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
+    return {color = color, depth = depth, size = size, sizef = la.array_cast(size, f32)}
 }
 
 @(private)
-compute_triangle_bounds :: #force_inline proc "contextless" (
-    triangle: Triangle,
-    viewport_min, viewport_max: Vector2i,
-) -> (
-    r_min, r_max: Vector2i,
-) {
-
-    p0, p1, p2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
-
-    // Find triangle bounds...
-    r_min = la.array_cast(la.min(p0.xy, p1.xy, p2.xy), int)
-    r_max = la.array_cast(la.max(p0.xy, p1.xy, p2.xy), int)
-
-    // Clamp rasterization bounds to the viewport.
-    r_min = la.clamp(r_min, viewport_min, viewport_max)
-    r_max = la.clamp(r_max, viewport_min, viewport_max)
-
-    return
-}
-
-@(private)
-compute_index :: #force_inline proc "contextless" (x, y, width: int) -> int {
+compute_index :: proc "contextless" (x, y, width: int) -> int {
     return (y * width) + x
 }

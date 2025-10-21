@@ -62,47 +62,30 @@ flush_renderer :: proc(renderer: ^Renderer) {
     // Process all triangles submit this frame.
     for &triangle in renderer.triangles {
 
-        // Map the triangle to the viewport (NDC -> Viewport).
-        for &vertex in triangle.vertices {
-
-            // Do the "perspective divide"
-            vertex.position.w = 1.0 / vertex.position.w
-            vertex.position.xyz *= vertex.position.w
-
-            // NDC -> Viewport
-            vertex.position.xy = (vertex.position.xy + 1.0) / 2.0
-            vertex.position.x *= cast(f32)_ctx.framebuffer.width
-            vertex.position.y *= cast(f32)_ctx.framebuffer.height
-        }
-
-        triangle_min, triangle_max := compute_triangle_bounds(triangle, 0, _ctx.framebuffer.size - 1)
-
         if get_toggle(.Multithreading) {
 
-            // Submit triangle to the tiled region.
-            submit_to_tiles(renderer, &triangle, triangle_min, triangle_max)
+            // Submit triangle to overlapping tiles.
+            submit_to_tiles(renderer, &triangle)
 
         } else {
 
             // Render the triangle, directly.
-            rasterize_triangle(&triangle, triangle_min, triangle_max)
+            rasterize_triangle(&triangle, 0, _ctx.framebuffer.size - 1)
         }
     }
 
     dispatch_tiles(&_ctx.renderer, dispatch_start_time)
 
-    submit_to_tiles :: proc(
-        renderer: ^Renderer,
-        triangle: ^Triangle,
-        triangle_min, triangle_max: Vector2i,
-    ) #no_bounds_check {
+    submit_to_tiles :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
+
+        triangle_min, triangle_max := compute_triangle_bounds(triangle^)
 
         // Compute the rectangular range of overlapping tiles.
         co_min := (triangle_min) / renderer.tile_size
         co_max := (triangle_max + (renderer.tile_size - 1)) / renderer.tile_size
 
-        for y in co_min.y ..< co_max.y {
-            for x in co_min.x ..< co_max.x {
+        for y in max(0, co_min.y) ..< min(co_max.y, _ctx.renderer.tile_count.y) {
+            for x in max(0, co_min.x) ..< min(co_max.x, _ctx.renderer.tile_count.x) {
                 tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
                 append_elem(&tile.triangles, triangle)
             }
@@ -158,8 +141,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
             info := cast(^Task_Info)task.data
             for triangle in info.tile.triangles {
-                range_min, range_max := compute_triangle_bounds(triangle^, info.tile.min, info.tile.max)
-                rasterize_triangle(triangle, range_min, range_max)
+                rasterize_triangle(triangle, info.tile.min, info.tile.max)
             }
 
             sync.wait_group_done(&info.renderer.wait_group)
@@ -169,39 +151,44 @@ flush_renderer :: proc(renderer: ^Renderer) {
 }
 
 @(private)
-rasterize_triangle :: proc "contextless" (triangle: ^Triangle, range_min, range_max: [2]int) #no_bounds_check {
+rasterize_triangle :: proc "contextless" (triangle: ^Triangle, range_min, range_max: Vector2i) #no_bounds_check {
+
+    // Clamp rasterization to range (preventing out-of-bounds access & raster "clipping planes")
+    triangle_min, triangle_max := compute_triangle_bounds(triangle^)
+    triangle_min = la.clamp(triangle_min, range_min, range_max)
+    triangle_max = la.clamp(triangle_max, range_min, range_max)
 
     // Render the triangle!
     if !get_toggle(.Disable_SIMD) && simd.HAS_HARDWARE_SIMD {
-        rasterize_triangle_simd(triangle, range_min, range_max)
+        rasterize_triangle_simd(triangle, triangle_min, triangle_max)
     } else {
-        rasterize_triangle_normal(triangle, range_min, range_max)
+        rasterize_triangle_normal(triangle, triangle_min, triangle_max)
     }
 }
 
 @(private = "file")
 rasterize_triangle_normal :: proc "contextless" (
     triangle: ^Triangle,
-    triangle_min, triangle_max: [2]int,
+    triangle_min, triangle_max: Vector2i,
 ) #no_bounds_check {
 
-    v0, v1, v2 := triangle.vertices[0].position, triangle.vertices[1].position, triangle.vertices[2].position
-    a, b, c := expand_values(triangle.vertices)
+    v0, v1, v2 := expand_values(triangle.vertices)
+    p0, p1, p2 := v0.position, v1.position, v2.position
 
     // Precompuse inverse area to optimize interpolation.
-    inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
+    inv_area := 1.0 / signed_area(p0.xy, p1.xy, p2.xy)
 
     // Barycentric interpolation starting points.
     v_min := la.array_cast(triangle_min.xy, f32)
-    weights_row: [3]f32 = {
-        signed_area(v1.xy, v2.xy, v_min),
-        signed_area(v2.xy, v0.xy, v_min),
-        signed_area(v0.xy, v1.xy, v_min),
+    weights_row := Vector3 {
+        signed_area(p1.xy, p2.xy, v_min),
+        signed_area(p2.xy, p0.xy, v_min),
+        signed_area(p0.xy, p1.xy, v_min),
     }
 
     // Incremental barycentric interpolation step factors.
-    delta_weights_col: [3]f32 = {v1.y - v2.y, v2.y - v0.y, v0.y - v1.y}
-    delta_weights_row: [3]f32 = {v2.x - v1.x, v0.x - v2.x, v1.x - v0.x}
+    delta_weights_col: Vector3 = {p1.y - p2.y, p2.y - p0.y, p0.y - p1.y}
+    delta_weights_row: Vector3 = {p2.x - p1.x, p0.x - p2.x, p1.x - p0.x}
 
     for y in triangle_min.y ..= triangle_max.y {
 
@@ -221,7 +208,7 @@ rasterize_triangle_normal :: proc "contextless" (
             // ---- DEPTH TEST ----
 
             frag_index := compute_index(x, y, _ctx.framebuffer.width)
-            frag_z := interpolate(v0.z, v1.z, v2.z, weights)
+            frag_z := interpolate(p0.z, p1.z, p2.z, weights)
 
             depth_ptr := raw_data(_ctx.framebuffer.depth)[frag_index:]
 
@@ -232,12 +219,12 @@ rasterize_triangle_normal :: proc "contextless" (
             color_ptr := raw_data(_ctx.framebuffer.color)[frag_index:]
 
             // Perspective correct interpolation weights.
-            perspective := (weights * {v0.w, v1.w, v2.w}) / interpolate(v0.w, v1.w, v2.w, weights)
+            perspective := (weights * {p0.w, p1.w, p2.w}) / interpolate(p0.w, p1.w, p2.w, weights)
 
             // ---- COMPUTE VARYING (INTERPOLATED) ATTRIBUTES ---
 
-            fragment_normal := interpolate(a.normal, b.normal, c.normal, perspective)
-            fragment_uv := interpolate(a.uv, b.uv, c.uv, perspective)
+            fragment_normal := interpolate(v0.normal, v1.normal, v2.normal, perspective)
+            fragment_uv := interpolate(v0.uv, v1.uv, v2.uv, perspective)
 
             // ---- FRAGMENT SHADER BEGIN ---
 
@@ -258,7 +245,7 @@ rasterize_triangle_normal :: proc "contextless" (
         }
     }
 
-    interpolate :: proc "contextless" (a, b, c: $T, weights: [3]f32) -> T {
+    interpolate :: proc "contextless" (a, b, c: $T, weights: Vector3) -> T {
         return (a * weights[0]) + (b * weights[1]) + (c * weights[2])
     }
 }
@@ -269,13 +256,13 @@ rasterize_triangle_simd :: proc "contextless" (
     triangle_min, triangle_max: Vector2i,
 ) #no_bounds_check {
 
-    a, b, c := triangle.vertices[0], triangle.vertices[1], triangle.vertices[2]
-    v0, v1, v2 := a.position, b.position, c.position
+    v0, v1, v2 := expand_values(triangle.vertices)
+    p0, p1, p2 := v0.position, v1.position, v2.position
 
     STEP_SIZES :: (#simd[4]f32){0, 1, 2, 3}
 
     // Precompuse inverse area to optimize interpolation.
-    inv_area := 1.0 / signed_area(v0.xy, v1.xy, v2.xy)
+    inv_area := 1.0 / signed_area(p0.xy, p1.xy, p2.xy)
 
     // SIMD reads and writes need to be 16 byte aligned.
     align_min_x := align_backward(triangle_min.x, 4)
@@ -287,27 +274,27 @@ rasterize_triangle_simd :: proc "contextless" (
     v_min := la.array_cast(triangle_min.xy, f32)
 
     // Barycentric interpolation starting points.
-    weights_row_0 := signed_area(v1.xy, v2.xy, v_min)
-    weights_row_1 := signed_area(v2.xy, v0.xy, v_min)
-    weights_row_2 := signed_area(v0.xy, v1.xy, v_min)
+    weights_row_0 := signed_area(p1.xy, p2.xy, v_min)
+    weights_row_1 := signed_area(p2.xy, p0.xy, v_min)
+    weights_row_2 := signed_area(p0.xy, p1.xy, v_min)
 
-    v12 := v1 - v2
-    v20 := v2 - v0
-    v01 := v0 - v1
+    p12 := p1 - p2
+    p20 := p2 - p0
+    p01 := p0 - p1
 
-    steps_v12y := v12.y * STEP_SIZES
-    steps_v20y := v20.y * STEP_SIZES
-    steps_v01y := v01.y * STEP_SIZES
+    steps_v12y := p12.y * STEP_SIZES
+    steps_v20y := p20.y * STEP_SIZES
+    steps_v01y := p01.y * STEP_SIZES
 
     for y in triangle_min.y ..= triangle_max.y {
 
-        weights_col_0 := weights_row_0 + (align_offset * v12.y)
-        weights_col_1 := weights_row_1 + (align_offset * v20.y)
-        weights_col_2 := weights_row_2 + (align_offset * v01.y)
+        weights_col_0 := weights_row_0 + (align_offset * p12.y)
+        weights_col_1 := weights_row_1 + (align_offset * p20.y)
+        weights_col_2 := weights_row_2 + (align_offset * p01.y)
 
-        weights_row_0 -= v12.x // ???
-        weights_row_1 -= v20.x
-        weights_row_2 -= v01.x
+        weights_row_0 -= p12.x // ???
+        weights_row_1 -= p20.x
+        weights_row_2 -= p01.x
 
         for x := align_min_x; x <= align_max_x; x += 4 {
 
@@ -315,9 +302,9 @@ rasterize_triangle_simd :: proc "contextless" (
             w1 := (weights_col_1 + steps_v20y) * inv_area
             w2 := (weights_col_2 + steps_v01y) * inv_area
 
-            weights_col_0 += v12.y * 4
-            weights_col_1 += v20.y * 4
-            weights_col_2 += v01.y * 4
+            weights_col_0 += p12.y * 4
+            weights_col_1 += p20.y * 4
+            weights_col_2 += p01.y * 4
 
             write_mask: #simd[4]u32 = ~u32(0)
             write_mask = write_mask & simd.lanes_ge(w0, 0)
@@ -331,7 +318,7 @@ rasterize_triangle_simd :: proc "contextless" (
             // ---- DEPTH TEST ----
 
             frag_index := compute_index(x, y, _ctx.framebuffer.width)
-            frag_z := interpolate(v0.z, v1.z, v2.z, w0, w1, w2)
+            frag_z := interpolate(p0.z, p1.z, p2.z, w0, w1, w2)
 
             depth_ptr := cast(^#simd[4]f32)raw_data(_ctx.framebuffer.depth)[frag_index:]
 
@@ -341,26 +328,26 @@ rasterize_triangle_simd :: proc "contextless" (
             }
 
             // Perspective correct interpolation weights.
-            w_factor := 1.0 / interpolate(v0.w, v1.w, v2.w, w0, w1, w2)
-            w0 = (w0 * v0.w) * w_factor
-            w1 = (w1 * v1.w) * w_factor
-            w2 = (w2 * v2.w) * w_factor
+            w_factor := 1.0 / interpolate(p0.w, p1.w, p2.w, w0, w1, w2)
+            w0 = (w0 * p0.w) * w_factor
+            w1 = (w1 * p1.w) * w_factor
+            w2 = (w2 * p2.w) * w_factor
 
             color_ptr := cast(^#simd[4]u32)raw_data(_ctx.framebuffer.color)[frag_index:]
 
             // ---- COMPUTE VARYING (INTERPOLATED) ATTRIBUTES ---
 
-            NX := interpolate(a.normal.x, b.normal.x, c.normal.x, w0, w1, w2)
-            NY := interpolate(a.normal.y, b.normal.y, c.normal.y, w0, w1, w2)
-            NZ := interpolate(a.normal.z, b.normal.z, c.normal.z, w0, w1, w2)
+            NX := interpolate(v0.normal.x, v1.normal.x, v2.normal.x, w0, w1, w2)
+            NY := interpolate(v0.normal.y, v1.normal.y, v2.normal.y, w0, w1, w2)
+            NZ := interpolate(v0.normal.z, v1.normal.z, v2.normal.z, w0, w1, w2)
 
-            U := interpolate(a.uv.x, b.uv.x, c.uv.x, w0, w1, w2)
-            V := interpolate(a.uv.y, b.uv.y, c.uv.y, w0, w1, w2)
+            U := interpolate(v0.uv.x, v1.uv.x, v2.uv.x, w0, w1, w2)
+            V := interpolate(v0.uv.y, v1.uv.y, v2.uv.y, w0, w1, w2)
 
             // ---- FRAGMENT SHADER BEGIN ---
 
             R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(triangle.image^, U, V))
-            write_mask = write_mask & simd.lanes_ne(A, 0) // alphg clipping (discard pixel)
+            write_mask = write_mask & simd.lanes_ne(A, 0) // alpha clipping (discard pixel)
 
             brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, _ctx.sun_direction)) * 0.75)
 
@@ -412,6 +399,19 @@ rasterize_triangle_simd :: proc "contextless" (
 }
 
 @(private = "file")
-signed_area :: #force_inline proc "contextless" (a, b, c: [2]f32) -> f32 {
+compute_triangle_bounds :: proc "contextless" (triangle: Triangle) -> (r_min, r_max: Vector2i) {
+
+    p0 := la.array_cast(triangle.vertices[0].position.xy, int)
+    p1 := la.array_cast(triangle.vertices[1].position.xy, int)
+    p2 := la.array_cast(triangle.vertices[2].position.xy, int)
+
+    r_min = la.min(p0, p1, p2)
+    r_max = la.max(p0, p1, p2)
+
+    return
+}
+
+@(private = "file")
+signed_area :: proc "contextless" (a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
