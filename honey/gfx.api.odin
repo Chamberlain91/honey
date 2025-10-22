@@ -32,7 +32,7 @@ thread_init :: proc() {
     thread.pool_init(&_ctx.pool, context.allocator, os.processor_core_count() - 1)
     thread.pool_start(&_ctx.pool)
 
-    fmt.printfln("Started thread pool with {} workers.", len(_ctx.pool.threads))
+    fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))
 }
 
 // Gets the size of the framebuffer (may differ from the window size based on initialization scale).

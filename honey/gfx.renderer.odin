@@ -52,6 +52,12 @@ create_renderer :: proc(tile_size: int) -> (renderer: Renderer) {
         }
     }
 
+    fmt.printfln(
+        "[INFO] Created {} raster tile groups ({}x{}).",
+        len(renderer.tiles),
+        expand_values(renderer.tile_count),
+    )
+
     return
 }
 

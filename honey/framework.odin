@@ -23,12 +23,13 @@ texture_: ray.Texture2D
 // - `width`, `height` Size of the framebuffer.
 // - `scale` Used to scale up the specified `width` and `height` when creating the window.
 // - `target_fps` Set to `0` to match the primary monitor. Set to `negative` to unlock framerate. Set `positive` to lock framerate to specified number.
-initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fps: int = 0) {
+initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fps: int = 0, fullscreen := false) {
 
     ray.SetTraceLogLevel(.WARNING)
 
     title := strings.clone_to_cstring(title, context.temp_allocator)
     ray.InitWindow(cast(c.int)(cast(f32)width * scale), cast(c.int)(cast(f32)height * scale), title)
+    ray.SetWindowState({.WINDOW_ALWAYS_RUN})
 
     // Match monitor FPS.
     if target_fps == 0 {
@@ -37,15 +38,19 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         ray.SetTargetFPS(cast(c.int)target_fps)
     }
 
+    // Go fullscreen if requested.
+    if fullscreen do ray.ToggleBorderlessWindowed()
+
+    // Kick thread pool.
+    thread_init()
+
     // Construct screen image.
     {
         img := ray.GenImageColor(cast(c.int)width, cast(c.int)height, ray.RED)
         defer ray.UnloadImage(img)
 
         _ctx.framebuffer = allocate_framebuffer({width, height})
-        _ctx.renderer = create_renderer(100)
-        thread_init()
-
+        _ctx.renderer = create_renderer(96)
         texture_ = ray.LoadTextureFromImage(img)
     }
 }
