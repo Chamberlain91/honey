@@ -8,6 +8,13 @@ import ray "vendor:raylib"
 DEV_BUILD :: #config(DEV_BUILD, ODIN_DEBUG)
 
 WHITE :: ray.WHITE
+RED :: ray.RED
+GREEN :: ray.GREEN
+BLUE :: ray.BLUE
+CYAN :: Color{0x0, 0xFF, 0xFF, 0xFF}
+ORANGE :: Color{0xFF, 0x7F, 0x0, 0xFF}
+YELLOW :: ray.YELLOW
+MAGENTA :: ray.MAGENTA
 
 @(private = "file")
 texture_: ray.Texture2D

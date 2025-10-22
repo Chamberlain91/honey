@@ -118,7 +118,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
         }
 
         // Record the time since start of submit and dispatch of tiles.
-        _ctx.stats.dispatch_duration = time.since(dispatch_start_time)
+        update_stat(&_ctx.stats.dispatch_duration, time.since(dispatch_start_time))
 
         rasterization_start_time := time.now()
 
@@ -126,7 +126,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
         sync.wait_group_wait(&renderer.wait_group)
 
         // Record the time spend waiting for rasterization tasks.
-        _ctx.stats.rasterization_duration = time.since(rasterization_start_time)
+        update_stat(&_ctx.stats.rasterization_duration, time.since(rasterization_start_time))
 
         // At this point, all triangles in the tile need to be processed.
         for &tile in renderer.tiles {

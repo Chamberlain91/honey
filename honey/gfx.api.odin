@@ -2,6 +2,7 @@ package honey
 
 import "base:intrinsics"
 import "core:fmt"
+import "core:math"
 import la "core:math/linalg"
 import "core:mem"
 import "core:os"
@@ -45,21 +46,26 @@ get_framebuffer_aspect :: proc() -> f32 {
     return cast(f32)size.x / cast(f32)size.y
 }
 
-// Gets the triangle count since last call to `gfx_begin_rendering()`.
+// Gets the triangle count since last call to `begin_rendering()`.
 get_triangle_count :: proc() -> int {
     return _ctx.stats.triangle_count
 }
 
-get_vertex_duration :: proc() -> time.Duration {
+// Gets time spent projecting triangles to screen (in miliseconds).
+get_vertex_duration :: proc() -> f64 {
     return _ctx.stats.vertex_duration
 }
 
-get_raster_duration :: proc() -> time.Duration {
-    return _ctx.stats.rasterization_duration
+// Gets time spent rasterizing triangles (in miliseconds).
+get_raster_duration :: proc() -> f64 {
+    // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
+    return get_toggle(.Multithreading) ? _ctx.stats.rasterization_duration : _ctx.stats.dispatch_duration
 }
 
-get_dispatch_duration :: proc() -> time.Duration {
-    return _ctx.stats.dispatch_duration
+// Gets time spent dispatching triangles to threads (in miliseconds).
+get_dispatch_duration :: proc() -> f64 {
+    // Single-threaded mode doesn't have a dispatch step.
+    return get_toggle(.Multithreading) ? _ctx.stats.dispatch_duration : 0
 }
 
 // TODO: Better name
@@ -89,31 +95,24 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
     slice.fill(_ctx.framebuffer.color, color)
     slice.fill(_ctx.framebuffer.depth, depth)
 
-    _ctx.stats = {
-        vertex_start_time = time.now(),
-    }
-
     // Each frame will have a new triangle list.
     clear(&_ctx.renderer.triangles)
+
+    _ctx.stats.vertex_start_time = time.now()
+    _ctx.stats.triangle_count = 0
 }
 
 // Ends rendering, flushing the framebuffer to the screen.
 end_rendering :: proc() {
 
     // Vertex processing stage is now 'complete'.
-    _ctx.stats.vertex_duration = time.since(_ctx.stats.vertex_start_time)
+    update_stat(&_ctx.stats.vertex_duration, time.since(_ctx.stats.vertex_start_time))
 
     // Count the number of triangles drawn.
     _ctx.stats.triangle_count += len(_ctx.renderer.triangles)
 
     // Process all triangles.
     flush_renderer(&_ctx.renderer)
-
-    // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
-    if !get_toggle(.Multithreading) {
-        _ctx.stats.rasterization_duration = _ctx.stats.dispatch_duration
-        _ctx.stats.dispatch_duration = 0
-    }
 
     window_flush_content()
 }
@@ -186,14 +185,6 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
 
     p0, p1, p2 := v0.position, v1.position, v2.position
 
-    edge0 := p1.xyz - p0.xyz
-    edge1 := p2.xyz - p0.xyz
-
-    // Backface culling. Compare normal to "view vector", negative indicates away from viewpoint.
-    if get_toggle(.Backface_Culling) && la.dot(la.cross(edge0, edge1), p0.xyz) < 0 {
-        return
-    }
-
     // Reject the triangle if it is completely out of view.
     if p0.x > +p0.w && p1.x > +p1.w && p2.x > +p2.w do return
     if p0.x < -p0.w && p1.x < -p1.w && p2.x < -p2.w do return
@@ -202,64 +193,70 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
     if p0.z > +p0.w && p1.z > +p1.w && p2.z > +p2.w do return
     if p0.z < 0 && p1.z < 0 && p2.z < 0 do return
 
-    if p0.z < 0 {
-        if p1.z < 0 {
-            clip2(v0, v1, v2, image)
-        } else if p2.z < 0 {
-            clip2(v0, v2, v1, image)
-        } else {
-            clip1(v0, v1, v2, image)
-        }
-    } else if p1.z < 0 {
-        if p2.z < 0 {
-            clip2(v1, v2, v0, image)
-        } else {
-            clip1(v1, v0, v2, image)
-        }
-    } else if p2.z < 0 {
-        clip1(v2, v0, v1, image)
-    } else {
-        // No clipping needed.
+    is_clip0 := p0.z < 0.001
+    is_clip1 := p1.z < 0.001
+    is_clip2 := p2.z < 0.001
+
+    vN := [3]VS_Out{v0, v1, v2}
+
+    switch int(is_clip0) + int(is_clip1) + int(is_clip2) {
+
+    case 0:
         append_triangle(v0, v1, v2, image)
+
+    case 1:
+        i0 := is_clip0 ? 0 : is_clip1 ? 1 : 2
+        i1 := (i0 + 1) % 3
+        i2 := (i0 + 2) % 3
+
+        c0, c1, c2 := vN[i0], vN[i1], vN[i2]
+        z0, z1, z2 := c0.position.z, c1.position.z, c2.position.z
+
+        vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
+        vB := interpolate_vertex(c0, c2, -z0 / (z2 - z0))
+
+        append_triangle(vB, vA, c2, image)
+        append_triangle(vA, c1, c2, image)
+
+    case 2:
+        i0 := !is_clip0 ? 0 : !is_clip1 ? 1 : 2
+        i1 := (i0 + 1) % 3
+        i2 := (i0 + 2) % 3
+
+        c0, c1, c2 := vN[i0], vN[i1], vN[i2]
+        z0, z1, z2 := c0.position.z, c1.position.z, c2.position.z
+
+        vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
+        vB := interpolate_vertex(c0, c2, -z0 / (z2 - z0))
+
+        append_triangle(vB, c0, vA, image)
     }
 
-    clip1 :: proc(v0, v1, v2: VS_Out, image: ^Image) {
-        z0, z1, z2 := v0.position.z, v1.position.z, v2.position.z
+    append_triangle :: proc(x0, x1, x2: VS_Out, image: ^Image) {
 
-        vA := interpolate_vertex(v0, v1, -z0 / (z1 - z0))
-        vB := interpolate_vertex(v0, v2, -z0 / (z2 - z0))
+        v0, v1, v2 := map_to_viewport(x0), map_to_viewport(x1), map_to_viewport(x2)
 
-        append_triangle(vA, v1, v2, image)
-        append_triangle(vB, vA, v2, image)
+        // Determine if this face is a backface (culled).
+        is_backface := la.cross(v1.position.xy - v0.position.xy, v2.position.xy - v0.position.xy) < 0
+        if get_toggle(.Backface_Culling) && is_backface {
+            return
+        }
+
+        append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, image})
     }
 
-    clip2 :: proc(v0, v1, v2: VS_Out, image: ^Image) {
-        z0, z1, z2 := v0.position.z, v1.position.z, v2.position.z
+    map_to_viewport :: proc(vertex: VS_Out) -> (output: VS_Out) {
 
-        vA := interpolate_vertex(v0, v2, -z0 / (z2 - z0))
-        vB := interpolate_vertex(v1, v2, -z1 / (z2 - z1))
-
-        append_triangle(vA, vB, v2, image)
-    }
-
-    append_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) {
-        append(
-            &_ctx.renderer.triangles,
-            Triangle{{map_to_viewport(v0), map_to_viewport(v1), map_to_viewport(v2)}, image},
-        )
-    }
-
-    map_to_viewport :: proc(vertex: VS_Out) -> VS_Out {
-        vertex := vertex
+        output = vertex
 
         // Perspective divide
-        vertex.position.w = 1.0 / vertex.position.w
-        vertex.position.xyz *= vertex.position.w
+        output.position.w = 1.0 / vertex.position.w
+        output.position.xyz *= output.position.w
 
         // NDC -> Viewport
-        vertex.position.xy = ((vertex.position.xy + 1.0) / 2.0) * _ctx.framebuffer.sizef
+        output.position.xy = ((output.position.xy + 1.0) / 2.0) * _ctx.framebuffer.size_float
 
-        return vertex
+        return output
     }
 
     interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
@@ -297,10 +294,10 @@ _ctx: struct {
     toggles:       bit_set[Toggle],
     sun_direction: Vector3,
     stats:         struct {
-        dispatch_duration:      time.Duration,
-        rasterization_duration: time.Duration,
+        dispatch_duration:      f64,
+        rasterization_duration: f64,
         vertex_start_time:      time.Time,
-        vertex_duration:        time.Duration,
+        vertex_duration:        f64,
         triangle_count:         int,
     },
     vertex_cache:  [dynamic]VS_Out,
@@ -312,25 +309,30 @@ _ctx: struct {
 
 @(private)
 Framebuffer :: struct {
-    color:   []Color,
-    depth:   []f32,
-    using _: struct #raw_union {
+    color:      []Color,
+    depth:      []f32,
+    using _:    struct #raw_union {
         using _: struct {
             width, height: int,
         },
         size:    Vector2i,
     },
-    sizef:   [2]f32,
+    size_float: [2]f32,
 }
 
 @(private)
 allocate_framebuffer :: proc(size: Vector2i) -> Framebuffer {
     color := mem.make_aligned([]Color, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
     depth := mem.make_aligned([]f32, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
-    return {color = color, depth = depth, size = size, sizef = la.array_cast(size, f32)}
+    return {color = color, depth = depth, size = size, size_float = la.array_cast(size, f32)}
 }
 
 @(private)
 compute_index :: proc "contextless" (x, y, width: int) -> int {
     return (y * width) + x
+}
+
+@(private)
+update_stat :: proc(old_value: ^f64, duration: time.Duration, factor: f64 = 0.1) {
+    old_value^ = math.lerp(old_value^, time.duration_milliseconds(duration), factor)
 }

@@ -99,8 +99,6 @@ image_sample :: proc "contextless" (image: Image, uv: [2]f32) -> Color #no_bound
 @(private)
 image_sample_simd :: proc "contextless" (image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
 
-    U, V := U, V
-
     // Computes the offset within the image data.
     xs := cast(#simd[4]i32)(wrap(U) * cast(f32)(image.size.x - 1))
     ys := cast(#simd[4]i32)(wrap(V) * cast(f32)(image.size.y - 1))

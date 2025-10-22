@@ -30,14 +30,6 @@ main :: proc() {
     main_loop: for honey.is_window_open() {
         defer free_all(context.temp_allocator)
 
-        // Show cursor when holding Left ALT.
-        honey.set_cursor_visible(honey.is_key_down(.LEFT_ALT))
-
-        // Only grab the cursor when its hidden and window has focus.
-        defer if !honey.is_cursor_visible() && honey.is_window_focused() {
-            honey.set_mouse_position(honey.window_size() / 2)
-        }
-
         camera_dir: honey.Vector3 = {
             math.cos(camera_heading) * math.cos(camera_pitch),
             math.sin(camera_pitch),
@@ -51,7 +43,7 @@ main :: proc() {
             la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
         status := fmt.tprintf(
-            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvertex: {}\ndispatch: {}\nraster: {}",
+            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvertex: {:.2f} ms\ndispatch: {:.2f} ms\nraster: {:.2f} ms",
             honey.get_toggle(.Backface_Culling),
             !honey.get_toggle(.Disable_SIMD),
             honey.get_toggle(.Multithreading),
@@ -73,6 +65,26 @@ main :: proc() {
             camera_heading += honey.mouse_delta().x * 0.01
             camera_pitch -= honey.mouse_delta().y * 0.01
             camera_pitch = clamp(camera_pitch, -PITCH_LIMIT, PITCH_LIMIT)
+        }
+
+        // Show cursor while holding ALT.
+        if honey.is_window_focused() {
+            if honey.is_key_down(.LEFT_ALT) {
+                honey.set_cursor_visible(true)
+            } else {
+                honey.set_cursor_visible(false)
+            }
+        }
+
+        // Show cursor when lost focus.
+        if !honey.is_cursor_visible() && !honey.is_window_focused() {
+            honey.set_cursor_visible(true)
+        }
+
+        // If the cursor is hidden (mouse grab, reset to window center)
+        if !honey.is_cursor_visible() {
+            honey.set_mouse_position(honey.window_size() / 2)
+            honey.set_cursor_visible(false)
         }
 
         move: honey.Vector3
