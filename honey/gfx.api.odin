@@ -169,7 +169,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
             a := _ctx.vertex_cache[mesh.indices[i + 0]]
             b := _ctx.vertex_cache[mesh.indices[i + 2]]
             c := _ctx.vertex_cache[mesh.indices[i + 1]]
-            process_triangle(a, b, c, image)
+            process_triangle({a, b, c}, image)
         }
     }
 
@@ -181,7 +181,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 }
 
 @(private)
-process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
+process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
 
     PROFILE_SCOPED_EVENT(#procedure)
 
@@ -213,33 +213,28 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
     //   +   +
     //  +-----+
 
-    p0, p1, p2 := v0.position, v1.position, v2.position
+    p0, p1, p2 := vertices[0].position, vertices[1].position, vertices[2].position
 
-    // Reject the triangle if it is completely out of view.
-    if p0.x > +p0.w && p1.x > +p1.w && p2.x > +p2.w do return
-    if p0.x < -p0.w && p1.x < -p1.w && p2.x < -p2.w do return
-    if p0.y > +p0.w && p1.y > +p1.w && p2.y > +p2.w do return
-    if p0.y < -p0.w && p1.y < -p1.w && p2.y < -p2.w do return
-    if p0.z > +p0.w && p1.z > +p1.w && p2.z > +p2.w do return
-    if p0.z < 0 && p1.z < 0 && p2.z < 0 do return
+    // Reject the triangle if it is completely out of view (beyond frustum).
+    for axis in 0 ..< 3 do if check_outside_view(p0, p1, p2, axis) {
+        return
+    }
 
     is_clip0 := p0.z < 0.001
     is_clip1 := p1.z < 0.001
     is_clip2 := p2.z < 0.001
 
-    vN := [3]VS_Out{v0, v1, v2}
-
     switch int(is_clip0) + int(is_clip1) + int(is_clip2) {
 
     case 0:
-        append_triangle(v0, v1, v2, image)
+        append_triangle(expand_values(vertices), image)
 
     case 1:
         i0 := is_clip0 ? 0 : is_clip1 ? 1 : 2
         i1 := (i0 + 1) % 3
         i2 := (i0 + 2) % 3
 
-        c0, c1, c2 := vN[i0], vN[i1], vN[i2]
+        c0, c1, c2 := vertices[i0], vertices[i1], vertices[i2]
         z0, z1, z2 := c0.position.z, c1.position.z, c2.position.z
 
         vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
@@ -253,7 +248,7 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
         i1 := (i0 + 1) % 3
         i2 := (i0 + 2) % 3
 
-        c0, c1, c2 := vN[i0], vN[i1], vN[i2]
+        c0, c1, c2 := vertices[i0], vertices[i1], vertices[i2]
         z0, z1, z2 := c0.position.z, c1.position.z, c2.position.z
 
         vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
@@ -275,12 +270,12 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
         append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, image})
     }
 
-    map_to_viewport :: proc(vertex: VS_Out) -> (output: VS_Out) {
+    map_to_viewport :: proc(vertex: VS_Out) -> VS_Out {
 
-        output = vertex
+        output := vertex
 
         // Perspective divide
-        output.position.w = 1.0 / vertex.position.w
+        output.position.w = 1.0 / output.position.w
         output.position.xyz *= output.position.w
 
         // NDC -> Viewport
@@ -290,11 +285,20 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
     }
 
     interpolate_vertex :: proc(a, b: VS_Out, t: f32) -> (c: VS_Out) {
-
         c.position = la.lerp(a.position, b.position, t)
         c.normal = la.lerp(a.normal, b.normal, t)
         c.uv = la.lerp(a.uv, b.uv, t)
         return
+    }
+
+    check_outside_view :: proc(p0, p1, p2: Vector4, AXIS: int) -> bool {
+        if test(p0, p1, p2, AXIS, +1) do return true
+        if test(p0, p1, p2, AXIS, -1) do return true
+        return false
+
+        test :: proc(p0, p1, p2: Vector4, AXIS: int, $SIGN: f32) -> bool {
+            return (p0[AXIS] * SIGN) > p0.w && (p1[AXIS] * SIGN) > p1.w && (p2[AXIS] * SIGN) > p2.w
+        }
     }
 }
 
