@@ -43,10 +43,9 @@ main :: proc() {
             la.matrix4_look_at_f32(camera_position, camera_position + camera_dir, {0, 1, 0})
 
         status := fmt.tprintf(
-            "(X) backface culling: {}\n(Z) simd rasterization: {}\n(C) multithreading: {}\ntriangle count: {}\nvertex: {:.2f} ms\ndispatch: {:.2f} ms\nraster: {:.2f} ms",
+            "(Z) simd rasterization: {}\n(X) backface culling: {}\ntriangle count: {}\nvertex: {:.2f} ms\ndispatch: {:.2f} ms\nraster: {:.2f} ms",
             honey.get_toggle(.Backface_Culling),
             !honey.get_toggle(.Disable_SIMD),
-            honey.get_toggle(.Multithreading),
             honey.get_triangle_count(),
             honey.get_vertex_duration(),
             honey.get_dispatch_duration(),
@@ -111,11 +110,6 @@ main :: proc() {
         // Backface culling
         if honey.is_key_pressed(.X) {
             honey.set_toggle(.Backface_Culling, !honey.get_toggle(.Backface_Culling))
-        }
-
-        // Multithreading
-        if honey.is_key_pressed(.C) {
-            honey.set_toggle(.Multithreading, !honey.get_toggle(.Multithreading))
         }
     }
 }

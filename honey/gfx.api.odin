@@ -6,6 +6,7 @@ import "core:math"
 import la "core:math/linalg"
 import "core:mem"
 import "core:slice"
+import "core:sync"
 import sysinfo "core:sys/info"
 import "core:thread"
 import "core:time"
@@ -65,20 +66,17 @@ get_vertex_duration :: proc() -> f64 {
 
 // Gets time spent rasterizing triangles (in miliseconds).
 get_raster_duration :: proc() -> f64 {
-    // Single-threaded mode doesn't have a dispatch step, so we actually measured rasterization.
-    return get_toggle(.Multithreading) ? _ctx.stats.rasterization_duration : _ctx.stats.dispatch_duration
+    return _ctx.stats.rasterization_duration
 }
 
 // Gets time spent dispatching triangles to threads (in miliseconds).
 get_dispatch_duration :: proc() -> f64 {
-    // Single-threaded mode doesn't have a dispatch step.
-    return get_toggle(.Multithreading) ? _ctx.stats.dispatch_duration : 0
+    return _ctx.stats.dispatch_duration
 }
 
 // TODO: Better name
 Toggle :: enum {
     Backface_Culling,
-    Multithreading,
     Disable_SIMD,
 }
 
@@ -105,11 +103,12 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
     PROFILE_SCOPED_EVENT(#procedure)
 
     if PROFILE_SCOPED_EVENT(#procedure + ":color") {
+        // TODO: Perhaps slice.zero (much faster)
         slice.fill(_ctx.framebuffer.color, color)
     }
 
     if PROFILE_SCOPED_EVENT(#procedure + ":depth") {
-        // TODO: Perhaps slice.zero (must faster)
+        // TODO: Perhaps slice.zero (much faster)
         slice.fill(_ctx.framebuffer.depth, 1.0)
     }
 
@@ -124,6 +123,9 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
 end_rendering :: proc() {
 
     PROFILE_SCOPED_EVENT(#procedure)
+
+    // Wait for all triangles to be processed.
+    sync.wait_group_wait(&_ctx.renderer.wait_group)
 
     // Vertex processing stage is now 'complete'.
     update_stat(&_ctx.stats.vertex_duration, time.since(_ctx.stats.vertex_start_time))
@@ -149,27 +151,76 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
     PROFILE_SCOPED_EVENT(#procedure)
 
+    vertex_cache := make([]VS_Out, len(mesh.vertices), context.temp_allocator)
+
     if PROFILE_SCOPED_EVENT(#procedure + ":transform") {
 
         // Transform the entire mesh vertex set.
-        resize(&_ctx.vertex_cache, len(mesh.vertices))
         for v, i in mesh.vertices {
-            _ctx.vertex_cache[i] = VS_Out {
+            v_out := VS_Out {
                 position = transform_vertex(v, transform),
                 normal   = v.normal,
                 uv       = v.uv,
             }
+            vertex_cache[i] = v_out
         }
     }
 
     // Process each triangle.
     if PROFILE_SCOPED_EVENT(#procedure + ":process") {
 
-        for i := 0; i < len(mesh.indices); i += 3 {
-            a := _ctx.vertex_cache[mesh.indices[i + 0]]
-            b := _ctx.vertex_cache[mesh.indices[i + 2]]
-            c := _ctx.vertex_cache[mesh.indices[i + 1]]
-            process_triangle({a, b, c}, image)
+        VERTEX_BATCH_SIZE :: 16384 * 3 // 16K triangles per batch
+
+        for i := 0; i < len(mesh.indices); i += VERTEX_BATCH_SIZE {
+
+            sync.wait_group_add(&_ctx.renderer.wait_group, 1)
+            thread.pool_add_task(
+                &_ctx.pool,
+                context.allocator,
+                process_triangle_task,
+                new_clone(
+                    Triangle_Task_Info {
+                        mesh = mesh,
+                        image = image,
+                        vertices = vertex_cache,
+                        begin = i,
+                        end = min(i + VERTEX_BATCH_SIZE, len(mesh.indices) - 1),
+                    },
+                    context.temp_allocator,
+                ),
+            )
+        }
+    }
+
+    Triangle_Task_Info :: struct {
+        mesh:     Mesh,
+        image:    ^Image,
+        vertices: []VS_Out,
+        begin:    int,
+        end:      int,
+    }
+
+    process_triangle_task :: proc(task: thread.Task) {
+        info := cast(^Triangle_Task_Info)task.data
+
+        PROFILE_SCOPED_EVENT(#procedure)
+
+        @(thread_local)
+        batch: [dynamic]Triangle
+        clear(&batch)
+
+        defer sync.wait_group_done(&_ctx.renderer.wait_group)
+
+        for i := info.begin; i < info.end; i += 3 {
+            a := info.vertices[info.mesh.indices[i + 0]]
+            b := info.vertices[info.mesh.indices[i + 2]]
+            c := info.vertices[info.mesh.indices[i + 1]]
+            process_triangle({a, b, c}, info.image, &batch)
+        }
+
+        sync.guard(&_ctx.renderer.triangles_mutex)
+        for triangle in batch {
+            append(&_ctx.renderer.triangles, triangle)
         }
     }
 
@@ -181,9 +232,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 }
 
 @(private)
-process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
-
-    PROFILE_SCOPED_EVENT(#procedure)
+process_triangle :: proc(vertices: [3]VS_Out, image: ^Image, output: ^[dynamic]Triangle) #no_bounds_check {
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -227,7 +276,7 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
     switch int(is_clip0) + int(is_clip1) + int(is_clip2) {
 
     case 0:
-        append_triangle(expand_values(vertices), image)
+        append_triangle(expand_values(vertices), image, output)
 
     case 1:
         i0 := is_clip0 ? 0 : is_clip1 ? 1 : 2
@@ -240,8 +289,8 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
         vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
         vB := interpolate_vertex(c0, c2, -z0 / (z2 - z0))
 
-        append_triangle(vB, vA, c2, image)
-        append_triangle(vA, c1, c2, image)
+        append_triangle(vB, vA, c2, image, output)
+        append_triangle(vA, c1, c2, image, output)
 
     case 2:
         i0 := !is_clip0 ? 0 : !is_clip1 ? 1 : 2
@@ -254,10 +303,10 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
         vA := interpolate_vertex(c0, c1, -z0 / (z1 - z0))
         vB := interpolate_vertex(c0, c2, -z0 / (z2 - z0))
 
-        append_triangle(vB, c0, vA, image)
+        append_triangle(vB, c0, vA, image, output)
     }
 
-    append_triangle :: proc(x0, x1, x2: VS_Out, image: ^Image) {
+    append_triangle :: proc(x0, x1, x2: VS_Out, image: ^Image, output: ^[dynamic]Triangle) {
 
         v0, v1, v2 := map_to_viewport(x0), map_to_viewport(x1), map_to_viewport(x2)
 
@@ -267,7 +316,7 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image) #no_bounds_check {
             return
         }
 
-        append(&_ctx.renderer.triangles, Triangle{{v0, v1, v2}, image})
+        append(output, Triangle{{v0, v1, v2}, image})
     }
 
     map_to_viewport :: proc(vertex: VS_Out) -> VS_Out {
@@ -335,10 +384,10 @@ _ctx: struct {
         vertex_duration:        f64,
         triangle_count:         int,
     },
-    vertex_cache:  [dynamic]VS_Out,
+    // vertex_cache:  [dynamic]VS_Out,
     pool:          thread.Pool,
 } = {
-    toggles       = {.Backface_Culling, .Multithreading},
+    toggles       = {.Backface_Culling},
     sun_direction = la.normalize(Vector3{1, 3, -2}),
 }
 

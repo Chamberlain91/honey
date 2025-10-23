@@ -13,15 +13,17 @@ SIMD_ALIGN :: 16 when simd.HAS_HARDWARE_SIMD else 4
 
 Renderer :: struct {
     // Size of the tile (in pixels).
-    tile_size:  int,
+    tile_size:       int,
     // List of tiles contained by the renderer.
-    tiles:      []Raster_Tile,
+    tiles:           []Raster_Tile,
     // Number of tiles in each axis.
-    tile_count: Size,
+    tile_count:      Size,
     // Triangles waiting to be dispatched (work list).
-    triangles:  [dynamic]Triangle,
+    triangles:       [dynamic]Triangle,
+    // ...
+    triangles_mutex: sync.Atomic_Mutex,
     // Wait group for dispatched tiles.
-    wait_group: sync.Wait_Group,
+    wait_group:      sync.Wait_Group,
 }
 
 Raster_Tile :: struct {
@@ -63,28 +65,20 @@ create_renderer :: proc(tile_size: int) -> (renderer: Renderer) {
 
 flush_renderer :: proc(renderer: ^Renderer) {
 
+    PROFILE_SCOPED_EVENT(#procedure)
+
     dispatch_start_time := time.now()
 
-    // Process all triangles submit this frame.
+    // Submit triangle to overlapping tiles.
+    PROFILE_SCOPE_BEGIN("submit_to_tiles")
     for &triangle in renderer.triangles {
-
-        if get_toggle(.Multithreading) {
-
-            // Submit triangle to overlapping tiles.
-            submit_to_tiles(renderer, &triangle)
-
-        } else {
-
-            // Render the triangle, directly.
-            rasterize_triangle(&triangle, 0, _ctx.framebuffer.size - 1)
-        }
+        submit_to_tiles(renderer, &triangle)
     }
+    PROFILE_SCOPE_END()
 
     dispatch_tiles(&_ctx.renderer, dispatch_start_time)
 
     submit_to_tiles :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
-
-        PROFILE_SCOPED_EVENT(#procedure)
 
         triangle_min, triangle_max := compute_triangle_bounds(triangle^)
 
@@ -103,7 +97,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
     // Blocks to ensure all rendering of tiles have completed.
     dispatch_tiles :: proc(renderer: ^Renderer, dispatch_start_time: time.Time) {
 
-        PROFILE_SCOPE_BEGIN(#procedure + ":submit")
+        PROFILE_SCOPE_BEGIN(#procedure + ":launch")
 
         Task_Info :: struct {
             renderer: ^Renderer,
@@ -138,14 +132,8 @@ flush_renderer :: proc(renderer: ^Renderer) {
         // Wait for all tiles to complete.
         sync.wait_group_wait(&renderer.wait_group)
 
-
         // Record the time spend waiting for rasterization tasks.
         update_stat(&_ctx.stats.rasterization_duration, time.since(rasterization_start_time))
-
-        // At this point, all triangles in the tile need to be processed.
-        for &tile in renderer.tiles {
-            fmt.assertf(len(tile.triangles) == 0, "Tile must have zero triangles, but had {}", len(tile.triangles))
-        }
 
         PROFILE_SCOPE_END()
 
