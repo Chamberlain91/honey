@@ -3,7 +3,7 @@ package honey
 import sa "core:container/small_array"
 import "core:fmt"
 import la "core:math/linalg"
-import "core:os"
+import os "core:os/os2"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
@@ -56,7 +56,8 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
 
     fmt.printfln("[INFO] Reading wavefront model: {}", path)
 
-    data := os.read_entire_file(path) or_else fmt.panicf("Could not read model file: {}", path)
+    data, data_ok := os.read_entire_file(path, context.allocator)
+    panic_on_error(data_ok)
     defer delete(data)
 
     material: ^Image
@@ -81,7 +82,10 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
 
         case "mtllib":
             // Loads the referenced material library.
-            matlib_path, matlib_path_err := filepath.join({dir, parts[1]}, context.temp_allocator)
+            matlib_path, matlib_path_err := normalize_path_slash(
+                filepath.join({dir, parts[1]}, context.temp_allocator),
+                context.temp_allocator,
+            )
             panic_on_error(matlib_path_err)
             textures, texture_lookup = load_wavefront_materials(matlib_path)
             builders = make([]Mesh_Builder, len(textures))
@@ -242,7 +246,7 @@ load_wavefront_materials :: proc(path: string) -> (textures: []Image, textures_l
 
     fmt.printfln("[INFO] Reading wavefront material library: {}", path)
 
-    data, data_ok := os.read_entire_file(path)
+    data, data_ok := os.read_entire_file(path, context.allocator)
     panic_on_error(data_ok)
     defer delete(data)
 
@@ -271,7 +275,10 @@ load_wavefront_materials :: proc(path: string) -> (textures: []Image, textures_l
             name = strings.clone(parts[1], context.temp_allocator)
             materials[name] = ""
         case "map_Kd":
-            materials[name] = filepath.join({dir, parts[1]}, context.temp_allocator)
+            materials[name] = normalize_path_slash(
+                filepath.join({dir, parts[1]}, context.temp_allocator),
+                context.temp_allocator,
+            )
         }
     }
 

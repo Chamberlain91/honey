@@ -5,8 +5,8 @@ import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
 import "core:mem"
-import "core:os"
 import "core:slice"
+import sysinfo "core:sys/info"
 import "core:thread"
 import "core:time"
 
@@ -26,8 +26,17 @@ Mesh :: struct {
 @(private)
 thread_init :: proc() {
 
+    fmt.printfln("[SYSTEM] OS: {}", sysinfo.os_version.as_string)
+    fmt.printfln(
+        "[SYSTEM] CPU: {} ({} physical, {} logical)",
+        sysinfo.cpu.name,
+        sysinfo.cpu.physical_cores,
+        sysinfo.cpu.logical_cores,
+    )
+    fmt.printfln("[SYSTEM] RAM: {:M}", sysinfo.ram.total_ram)
+
     // We use N - 1 to give leeway for the main thread.
-    thread.pool_init(&_ctx.pool, context.allocator, os.processor_core_count() - 1)
+    thread.pool_init(&_ctx.pool, context.allocator, sysinfo.cpu.logical_cores - 1)
     thread.pool_start(&_ctx.pool)
 
     fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))

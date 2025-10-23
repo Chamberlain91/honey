@@ -17,7 +17,10 @@ Image :: struct {
 }
 
 /// Loads and image from the specified path.
-image_load :: proc(path: string) -> Image {
+image_load :: proc(_path: string) -> Image {
+
+    path, path_err := normalize_path_slash(_path, context.temp_allocator)
+    panic_on_error(path_err)
 
     fmt.printfln("[INFO] Reading image: {}", path)
 

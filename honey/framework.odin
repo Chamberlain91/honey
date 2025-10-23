@@ -2,6 +2,8 @@ package honey
 
 import "core:c"
 import "core:fmt"
+import "core:mem"
+import os "core:os/os2"
 import "core:strings"
 import ray "vendor:raylib"
 
@@ -215,6 +217,36 @@ panic_on_error :: proc(err: $E, loc := #caller_location) {
     } else {
         if err != nil {
             fmt.panicf("[ERROR] Encountered error: {}", err, loc = loc)
+        }
+    }
+}
+
+@(private)
+normalize_path_slash :: proc(
+    path: string,
+    allocator: mem.Allocator,
+) -> (
+    string,
+    mem.Allocator_Error,
+) #optional_allocator_error {
+
+    output, output_err := make([]byte, len(path))
+    if output_err != nil {
+        return "", output_err
+    }
+
+    for c, i in transmute([]byte)path {
+        output[i] = is_separator(c) ? os.Path_Separator : c
+    }
+
+    return cast(string)output, .None
+
+    is_separator :: proc(c: byte) -> bool {
+        switch c {
+        case '/', '\\':
+            return true
+        case:
+            return false
         }
     }
 }
