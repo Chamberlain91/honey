@@ -84,6 +84,8 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
     submit_to_tiles :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
 
+        PROFILE_SCOPED_EVENT(#procedure)
+
         triangle_min, triangle_max := compute_triangle_bounds(triangle^)
 
         // Compute the rectangular range of overlapping tiles.
@@ -100,6 +102,8 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
     // Blocks to ensure all rendering of tiles have completed.
     dispatch_tiles :: proc(renderer: ^Renderer, dispatch_start_time: time.Time) {
+
+        PROFILE_SCOPE_BEGIN(#procedure + ":submit")
 
         Task_Info :: struct {
             renderer: ^Renderer,
@@ -123,6 +127,9 @@ flush_renderer :: proc(renderer: ^Renderer) {
             thread.pool_add_task(&_ctx.pool, {}, process_tile, new_clone(info, context.temp_allocator))
         }
 
+        PROFILE_SCOPE_END()
+        PROFILE_SCOPE_BEGIN(#procedure + ":wait")
+
         // Record the time since start of submit and dispatch of tiles.
         update_stat(&_ctx.stats.dispatch_duration, time.since(dispatch_start_time))
 
@@ -130,6 +137,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
         // Wait for all tiles to complete.
         sync.wait_group_wait(&renderer.wait_group)
+
 
         // Record the time spend waiting for rasterization tasks.
         update_stat(&_ctx.stats.rasterization_duration, time.since(rasterization_start_time))
@@ -139,7 +147,11 @@ flush_renderer :: proc(renderer: ^Renderer) {
             fmt.assertf(len(tile.triangles) == 0, "Tile must have zero triangles, but had {}", len(tile.triangles))
         }
 
+        PROFILE_SCOPE_END()
+
         process_tile :: proc(task: thread.Task) {
+
+            PROFILE_SCOPED_EVENT(#procedure)
 
             // Rasterization work should be contextless.
             context.temp_allocator = {}

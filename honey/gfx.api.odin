@@ -12,8 +12,6 @@ import "core:time"
 
 DEFAULT_CLEAR_COLOR: Color : {0x18, 0x18, 0x18, 0xFF}
 
-DEFAULT_CLEAR_DEPTH: f32 : 1.0
-
 Vertex :: struct {
     position: Vector3,
     normal:   Vector3,
@@ -90,10 +88,21 @@ get_toggle :: proc "contextless" (toggle: Toggle) -> bool {
 }
 
 // Begins rendering, clearing the framebuffer.
-begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR_DEPTH) {
+begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
 
-    slice.fill(_ctx.framebuffer.color, color)
-    slice.fill(_ctx.framebuffer.depth, depth)
+    // Capture one frame when pressing end key.
+    enable_profiling(is_key_pressed(.END))
+
+    PROFILE_SCOPED_EVENT(#procedure)
+
+    if PROFILE_SCOPED_EVENT(#procedure + ":color") {
+        slice.fill(_ctx.framebuffer.color, color)
+    }
+
+    if PROFILE_SCOPED_EVENT(#procedure + ":depth") {
+        // TODO: Perhaps slice.zero (must faster)
+        slice.fill(_ctx.framebuffer.depth, 1.0)
+    }
 
     // Each frame will have a new triangle list.
     clear(&_ctx.renderer.triangles)
@@ -104,6 +113,8 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR, depth: f32 = DEFAULT_CLEAR
 
 // Ends rendering, flushing the framebuffer to the screen.
 end_rendering :: proc() {
+
+    PROFILE_SCOPED_EVENT(#procedure)
 
     // Vertex processing stage is now 'complete'.
     update_stat(&_ctx.stats.vertex_duration, time.since(_ctx.stats.vertex_start_time))
@@ -127,22 +138,30 @@ draw_model :: proc(model: Model, transform: Matrix) #no_bounds_check {
 // Draws the specified mesh texture image.
 draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
 
-    // Transform the entire mesh vertex set.
-    resize(&_ctx.vertex_cache, len(mesh.vertices))
-    for v, i in mesh.vertices {
-        _ctx.vertex_cache[i] = VS_Out {
-            position = transform_vertex(v, transform),
-            normal   = v.normal,
-            uv       = v.uv,
+    PROFILE_SCOPED_EVENT(#procedure)
+
+    if PROFILE_SCOPED_EVENT(#procedure + ":transform") {
+
+        // Transform the entire mesh vertex set.
+        resize(&_ctx.vertex_cache, len(mesh.vertices))
+        for v, i in mesh.vertices {
+            _ctx.vertex_cache[i] = VS_Out {
+                position = transform_vertex(v, transform),
+                normal   = v.normal,
+                uv       = v.uv,
+            }
         }
     }
 
     // Process each triangle.
-    for i := 0; i < len(mesh.indices); i += 3 {
-        a := _ctx.vertex_cache[mesh.indices[i + 0]]
-        b := _ctx.vertex_cache[mesh.indices[i + 2]]
-        c := _ctx.vertex_cache[mesh.indices[i + 1]]
-        process_triangle(a, b, c, image)
+    if PROFILE_SCOPED_EVENT(#procedure + ":process") {
+
+        for i := 0; i < len(mesh.indices); i += 3 {
+            a := _ctx.vertex_cache[mesh.indices[i + 0]]
+            b := _ctx.vertex_cache[mesh.indices[i + 2]]
+            c := _ctx.vertex_cache[mesh.indices[i + 1]]
+            process_triangle(a, b, c, image)
+        }
     }
 
     transform_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
@@ -154,6 +173,8 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
 @(private)
 process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
+
+    PROFILE_SCOPED_EVENT(#procedure)
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -259,7 +280,8 @@ process_triangle :: proc(v0, v1, v2: VS_Out, image: ^Image) #no_bounds_check {
         return output
     }
 
-    interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
+    interpolate_vertex :: proc(a, b: VS_Out, t: f32) -> (c: VS_Out) {
+
         c.position = la.lerp(a.position, b.position, t)
         c.normal = la.lerp(a.normal, b.normal, t)
         c.uv = la.lerp(a.uv, b.uv, t)

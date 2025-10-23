@@ -14,3 +14,6 @@ latest.log
 
 # IDE artifacts
 .vscode
+
+# Spall profiler artifacts
+profile.spall

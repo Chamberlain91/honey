@@ -88,6 +88,8 @@ window_size :: proc() -> Vector2i {
 @(private)
 window_flush_content :: proc() {
 
+    PROFILE_SCOPED_EVENT(#procedure)
+
     // Update texture with image contents.
     ray.UpdateTexture(texture_, raw_data(_ctx.framebuffer.color))
 
