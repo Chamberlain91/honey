@@ -159,6 +159,8 @@ flush_renderer :: proc(renderer: ^Renderer) {
 @(private)
 rasterize_triangle :: proc "contextless" (triangle: ^Triangle, range_min, range_max: Vector2i) #no_bounds_check {
 
+    PROFILE_SCOPED_EVENT(#procedure)
+
     // Clamp rasterization to range (preventing out-of-bounds access & raster "clipping planes")
     triangle_min, triangle_max := compute_triangle_bounds(triangle^)
     triangle_min = la.clamp(triangle_min, range_min, range_max)

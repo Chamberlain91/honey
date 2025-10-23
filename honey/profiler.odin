@@ -10,19 +10,19 @@ package honey
 ENALBE_SPALL_PROFILER :: #config(PROFILE, false)
 
 @(disabled = !ENALBE_SPALL_PROFILER, private = "package")
-PROFILE_SCOPE_BEGIN :: proc(name: string, loc := #caller_location) {
+PROFILE_SCOPE_BEGIN :: proc "contextless" (name: string, loc := #caller_location) {
     if !spall_enable do return
     spall._buffer_begin(&spall_context, spall_get_buffer(), name, location = loc)
 }
 
 @(disabled = !ENALBE_SPALL_PROFILER, private = "package")
-PROFILE_SCOPE_END :: proc() {
+PROFILE_SCOPE_END :: proc "contextless" () {
     if !spall_enable do return
     spall._buffer_end(&spall_context, spall_get_buffer())
 }
 
 @(deferred_none = PROFILE_SCOPE_END, private = "package")
-PROFILE_SCOPED_EVENT :: proc(name: string, loc := #caller_location) -> bool {
+PROFILE_SCOPED_EVENT :: proc "contextless" (name: string, loc := #caller_location) -> bool {
     if !spall_enable do return true
     when ENALBE_SPALL_PROFILER {
         PROFILE_SCOPE_BEGIN(name, loc)
@@ -31,7 +31,7 @@ PROFILE_SCOPED_EVENT :: proc(name: string, loc := #caller_location) -> bool {
 }
 
 @(private = "package", disabled = !ENALBE_SPALL_PROFILER)
-enable_profiling :: proc(enable: bool) {
+enable_profiling :: proc "contextless" (enable: bool) {
     spall_enable = enable
 }
 
@@ -45,6 +45,8 @@ when ENALBE_SPALL_PROFILER {
     _spall_static_init :: proc "contextless" () {
         context = runtime.default_context()
         spall_context = spall.context_create("profile.spall")
+        
+        context = runtime.default_context()
         fmt.printfln("[INFO] Initialized spall.")
     }
 
@@ -63,7 +65,7 @@ when ENALBE_SPALL_PROFILER {
 }
 
 @(no_instrumentation)
-spall_get_buffer :: proc() -> ^spall.Buffer {
+spall_get_buffer :: proc "contextless" () -> ^spall.Buffer {
 
     when ENALBE_SPALL_PROFILER {
 
@@ -74,7 +76,10 @@ spall_get_buffer :: proc() -> ^spall.Buffer {
         memory: [spall.BUFFER_DEFAULT_SIZE]u8
 
         if spall_buffer.data == nil {
+
+            context = runtime.default_context()
             fmt.printfln("[INFO] Constructing spall buffer for thread {}.", sync.current_thread_id())
+
             spall_buffer = spall.buffer_create(memory[:], u32(sync.current_thread_id()))
             append(&spall_buffers, &spall_buffer)
         }

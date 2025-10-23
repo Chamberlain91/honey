@@ -164,6 +164,10 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
             }
             vertex_cache[i] = v_out
         }
+
+        // TODO: Submit batch when enough has been placed into the cache
+        // TODO: The tail batch would then submit in end_rendering
+        // TODO: Rasterization could also possible be eager processed with temp allocator/arena
     }
 
     // Process each triangle.
@@ -218,6 +222,9 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
             process_triangle({a, b, c}, info.image, &batch)
         }
 
+        // Submit triangle batch...
+        // TODO: Is it possible to safely assign these triangles to the raster tiles?
+        //       Compute local cluters, then atomic lock and append?
         sync.guard(&_ctx.renderer.triangles_mutex)
         for triangle in batch {
             append(&_ctx.renderer.triangles, triangle)

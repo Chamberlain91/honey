@@ -51,8 +51,11 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
         img := ray.GenImageColor(cast(c.int)width, cast(c.int)height, ray.RED)
         defer ray.UnloadImage(img)
 
+        aspect := cast(f32)width / cast(f32)height
+        thread_split := cast(int)(cast(f32)len(_ctx.pool.threads) / aspect)
+
         _ctx.framebuffer = allocate_framebuffer({width, height})
-        _ctx.renderer = create_renderer(96)
+        _ctx.renderer = create_renderer(height / thread_split)
         texture_ = ray.LoadTextureFromImage(img)
     }
 }
