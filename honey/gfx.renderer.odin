@@ -63,6 +63,16 @@ create_renderer :: proc(tile_size: int) -> (renderer: Renderer) {
     return
 }
 
+delete_renderer :: proc(renderer: Renderer) {
+
+    for tile in renderer.tiles {
+        delete(tile.triangles)
+    }
+
+    delete(renderer.triangles)
+    delete(renderer.tiles)
+}
+
 flush_renderer :: proc(renderer: ^Renderer) {
 
     PROFILE_SCOPED_EVENT(#procedure)
@@ -133,20 +143,14 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
         PROFILE_SCOPE_END()
 
-        rasterize_tile_task :: proc(task: thread.Task) {
+        rasterize_tile_task :: proc "contextless" (info: Rasterize_Task_Info) {
 
             PROFILE_SCOPED_EVENT(#procedure)
 
-            // Rasterization work should be contextless.
-            context.temp_allocator = {}
-            context.allocator = {}
-
-            info := cast(^Rasterize_Task_Info)task.data
             for triangle in info.tile.triangles {
                 rasterize_triangle(triangle, info.tile.min, info.tile.max)
             }
 
-            sync.wait_group_done(&info.renderer.wait_group)
             clear(&info.tile.triangles)
         }
     }
@@ -421,13 +425,41 @@ signed_area :: proc "contextless" (a, b, c: [2]f32) -> f32 {
 }
 
 @(private)
-run_async :: #force_inline proc(task: thread.Task_Proc, group: ^sync.Wait_Group, data: $D) {
+run_async :: #force_inline proc(task: proc "contextless" (data: $D), group: ^sync.Wait_Group, data: D) {
 
     PROFILE_SCOPED_EVENT(#procedure)
 
     assert(group != nil)
     assert(task != nil)
 
+    Async_Task_Info :: struct {
+        procedure: proc "contextless" (_: D),
+        data:      D,
+        group:     ^sync.Wait_Group,
+    }
+
+    task_info := Async_Task_Info {
+        procedure = task,
+        data      = data,
+        group     = group,
+    }
+
+    // This group will have 1 unit of work to do.
     sync.wait_group_add(group, 1)
-    thread.pool_add_task(&_ctx.pool, context.allocator, task, new_clone(data, context.temp_allocator))
+
+    // Submit that unit of work.
+    thread.pool_add_task(&_ctx.pool, context.allocator, do_task, new_clone(task_info, context.allocator))
+
+    do_task :: proc(task: thread.Task) {
+
+        // Execute the unit of work.
+        info := cast(^Async_Task_Info)task.data
+        info.procedure(info.data)
+
+        // That unit of work is complete.
+        sync.wait_group_done(info.group)
+
+        // Free the task parameters.
+        free(info)
+    }
 }

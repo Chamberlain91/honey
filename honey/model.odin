@@ -23,6 +23,18 @@ destroy_model :: proc(model: Model) {
     }
 }
 
+delete_model :: proc(model: Model) {
+    for mesh in model.meshes {
+        delete(mesh.vertices)
+        delete(mesh.indices)
+    }
+    delete(model.meshes)
+    for image in model.textures {
+        delete(image.data)
+    }
+    delete(model.textures)
+}
+
 // Parse a Wavefront `*.obj` model format. This is rudementary!
 // This does not consider `*.mtl` files nor submeshes, smoothing groups, or other features.
 load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32 = 1.0, flip_uv := true) -> Model {

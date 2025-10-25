@@ -67,6 +67,9 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
 shutdown :: proc() {
     ray.UnloadTexture(texture_)
     ray.CloseWindow()
+    thread_kill()
+    delete_framebuffer(_ctx.framebuffer)
+    delete_renderer(_ctx.renderer)
 }
 
 // Determines if the window still wants to be open.
@@ -256,7 +259,7 @@ normalize_path_slash :: proc(
     mem.Allocator_Error,
 ) #optional_allocator_error {
 
-    output, output_err := make([]byte, len(path))
+    output, output_err := make([]byte, len(path), allocator)
     if output_err != nil {
         return "", output_err
     }

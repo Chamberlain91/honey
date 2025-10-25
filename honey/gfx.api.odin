@@ -1,6 +1,7 @@
 package honey
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
@@ -41,6 +42,12 @@ thread_init :: proc() {
     thread.pool_start(&_ctx.pool)
 
     fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))
+}
+
+@(private)
+thread_kill :: proc() {
+    thread.pool_shutdown(&_ctx.pool)
+    thread.pool_destroy(&_ctx.pool)
 }
 
 // Gets the size of the framebuffer (may differ from the window size based on initialization scale).
@@ -135,8 +142,6 @@ end_rendering :: proc() {
     flush_renderer(&_ctx.renderer)
 
     window_flush_content()
-
-    free_all(context.temp_allocator)
 }
 
 // Draws the specified model.
@@ -176,8 +181,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
         transform: Matrix,
     }
 
-    process_triangle_task :: proc(task: thread.Task) {
-        using info := cast(^Triangle_Task_Info)task.data
+    process_triangle_task :: proc "contextless" (info: Triangle_Task_Info) {
 
         PROFILE_SCOPED_EVENT(#procedure)
 
@@ -185,20 +189,20 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
         batch: [dynamic]Triangle
         clear(&batch)
 
-        for i := begin; i < end; i += 3 {
-            a := compute_vertex(mesh.vertices[mesh.indices[i + 0]], transform)
-            b := compute_vertex(mesh.vertices[mesh.indices[i + 2]], transform) // TODO: ???
-            c := compute_vertex(mesh.vertices[mesh.indices[i + 1]], transform)
-            process_triangle({a, b, c}, image, &batch)
+        for i := info.begin; i < info.end; i += 3 {
+            a := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 0]], info.transform)
+            b := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 2]], info.transform) // TODO: ???
+            c := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 1]], info.transform)
+            process_triangle({a, b, c}, info.image, &batch)
         }
 
         // Submit triangle batch to rasterizer pending list.
         // TODO: Is it possible to safely assign these triangles directly to the raster tiles?
         //       Compute local clusters, then atomic lock and append?
         sync.guard(&_ctx.renderer.triangles_mutex)
-        append(&_ctx.renderer.triangles, ..batch[:])
 
-        sync.wait_group_done(&_ctx.renderer.wait_group)
+        context = runtime.default_context()
+        append(&_ctx.renderer.triangles, ..batch[:])
     }
 
     transform_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
@@ -218,7 +222,11 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 }
 
 @(private)
-process_triangle :: proc(vertices: [3]VS_Out, image: ^Image, output: ^[dynamic]Triangle) #no_bounds_check {
+process_triangle :: proc "contextless" (
+    vertices: [3]VS_Out,
+    image: ^Image,
+    output: ^[dynamic]Triangle,
+) #no_bounds_check {
 
     // Case 0 (no clipping, emit 1 triangle)
     //     +
@@ -292,7 +300,7 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image, output: ^[dynamic]T
         append_triangle(vB, c0, vA, image, output)
     }
 
-    append_triangle :: proc(x0, x1, x2: VS_Out, image: ^Image, output: ^[dynamic]Triangle) {
+    append_triangle :: proc "contextless" (x0, x1, x2: VS_Out, image: ^Image, output: ^[dynamic]Triangle) {
 
         v0, v1, v2 := map_to_viewport(x0), map_to_viewport(x1), map_to_viewport(x2)
 
@@ -302,10 +310,11 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image, output: ^[dynamic]T
             return
         }
 
+        context = runtime.default_context()
         append(output, Triangle{{v0, v1, v2}, image})
     }
 
-    map_to_viewport :: proc(vertex: VS_Out) -> VS_Out {
+    map_to_viewport :: proc "contextless" (vertex: VS_Out) -> VS_Out {
 
         output := vertex
 
@@ -319,19 +328,19 @@ process_triangle :: proc(vertices: [3]VS_Out, image: ^Image, output: ^[dynamic]T
         return output
     }
 
-    interpolate_vertex :: proc(a, b: VS_Out, t: f32) -> (c: VS_Out) {
+    interpolate_vertex :: proc "contextless" (a, b: VS_Out, t: f32) -> (c: VS_Out) {
         c.position = la.lerp(a.position, b.position, t)
         c.normal = la.lerp(a.normal, b.normal, t)
         c.uv = la.lerp(a.uv, b.uv, t)
         return
     }
 
-    check_outside_view :: proc(p0, p1, p2: Vector4, AXIS: int) -> bool {
+    check_outside_view :: proc "contextless" (p0, p1, p2: Vector4, AXIS: int) -> bool {
         if test(p0, p1, p2, AXIS, +1) do return true
         if test(p0, p1, p2, AXIS, -1) do return true
         return false
 
-        test :: proc(p0, p1, p2: Vector4, AXIS: int, $SIGN: f32) -> bool {
+        test :: proc "contextless" (p0, p1, p2: Vector4, AXIS: int, $SIGN: f32) -> bool {
             return (p0[AXIS] * SIGN) > p0.w && (p1[AXIS] * SIGN) > p1.w && (p2[AXIS] * SIGN) > p2.w
         }
     }
@@ -395,6 +404,12 @@ allocate_framebuffer :: proc(size: Vector2i) -> Framebuffer {
     color := mem.make_aligned([]Color, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
     depth := mem.make_aligned([]f32, size.x * size.y, SIMD_ALIGN) or_else panic("allocate_framebuffer failed.")
     return {color = color, depth = depth, size = size, size_float = la.array_cast(size, f32)}
+}
+
+@(private)
+delete_framebuffer :: proc(framebuffer: Framebuffer) {
+    delete(framebuffer.color)
+    delete(framebuffer.depth)
 }
 
 @(private)

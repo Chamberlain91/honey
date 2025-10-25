@@ -4,6 +4,7 @@ import "./honey"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
+@(require) import "core:mem"
 
 RESOLUTION_FACTOR :: 4 // 4 = 1080p
 SCREEN_W :: 480 * RESOLUTION_FACTOR
@@ -13,13 +14,44 @@ PITCH_LIMIT :: (math.PI / 2) * 0.9
 
 main :: proc() {
 
+    when honey.DEV_BUILD {
+        track: mem.Tracking_Allocator
+        mem.tracking_allocator_init(&track, context.allocator)
+        context.allocator = mem.tracking_allocator(&track)
+        defer {
+
+            fmt.println("== Tracking Allocator ==")
+            fmt.printfln("current: {:#.1M}", track.current_memory_allocated)
+            fmt.printfln("total:   {:#.1M}", track.total_memory_allocated)
+            fmt.printfln("peak:    {:#.1M}", track.peak_memory_allocated)
+
+            if n := len(track.allocation_map); n > 0 {
+                fmt.printfln("== {} allocations not freed ==", n)
+                for _, entry in track.allocation_map {
+                    fmt.printfln("- {} bytes @ {}", entry.size, entry.location)
+                }
+            }
+
+            if n := len(track.bad_free_array); n > 0 {
+                fmt.printfln("== {} bad frees ==", n)
+                for entry in track.bad_free_array {
+                    fmt.printfln("- {} @ {}", entry.memory, entry.location)
+                }
+            }
+
+            mem.tracking_allocator_destroy(&track)
+        }
+    }
+
     // Initialize window.
     honey.initalize(SCREEN_W, SCREEN_H, "Honey Software Renderer", scale = 4 / RESOLUTION_FACTOR, target_fps = -1)
     defer honey.shutdown()
 
     // Load the models.
     character := honey.load_wavefront_model("assets/NexoITCH.obj", scale = 0.75)
+    defer honey.delete_model(character)
     sponza := honey.load_wavefront_model("assets/sponza.obj", scale = 0.01)
+    defer honey.delete_model(sponza)
 
     // default position within sponza.obj
     camera_position: honey.Vector3 = {-10.8, 0.57, 1.0}
@@ -28,6 +60,7 @@ main :: proc() {
 
     // Main loop.
     main_loop: for honey.is_window_open() {
+        defer free_all(context.temp_allocator)
 
         // Capture only a single frame when pressing 'end' key.
         honey.enable_profile_capture(honey.is_key_pressed(.END))
