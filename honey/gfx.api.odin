@@ -59,17 +59,17 @@ get_triangle_count :: proc() -> int {
     return _ctx.stats.triangle_count
 }
 
-// Gets time spent projecting triangles to screen (in miliseconds).
+// Gets time spent projecting triangles to screen (in milliseconds).
 get_vertex_duration :: proc() -> f64 {
     return _ctx.stats.vertex_duration
 }
 
-// Gets time spent rasterizing triangles (in miliseconds).
+// Gets time spent rasterizing triangles (in milliseconds).
 get_raster_duration :: proc() -> f64 {
     return _ctx.stats.rasterization_duration
 }
 
-// Gets time spent dispatching triangles to threads (in miliseconds).
+// Gets time spent dispatching triangles to threads (in milliseconds).
 get_dispatch_duration :: proc() -> f64 {
     return _ctx.stats.dispatch_duration
 }
@@ -97,14 +97,12 @@ get_toggle :: proc "contextless" (toggle: Toggle) -> bool {
 // Begins rendering, clearing the framebuffer.
 begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
 
-    // Capture one frame when pressing end key.
-    enable_profiling(is_key_pressed(.END))
-
     PROFILE_SCOPED_EVENT(#procedure)
 
     if PROFILE_SCOPED_EVENT(#procedure + ":color") {
         // TODO: Perhaps slice.zero (much faster)
-        slice.fill(_ctx.framebuffer.color, color)
+        // slice.fill(_ctx.framebuffer.color, color)
+        slice.zero(_ctx.framebuffer.color)
     }
 
     if PROFILE_SCOPED_EVENT(#procedure + ":depth") {
@@ -137,6 +135,8 @@ end_rendering :: proc() {
     flush_renderer(&_ctx.renderer)
 
     window_flush_content()
+
+    free_all(context.temp_allocator)
 }
 
 // Draws the specified model.
@@ -151,61 +151,33 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
     PROFILE_SCOPED_EVENT(#procedure)
 
-    vertex_cache := make([]VS_Out, len(mesh.vertices), context.temp_allocator)
+    BATCH_SIZE :: 2048 * 3
 
-    if PROFILE_SCOPED_EVENT(#procedure + ":transform") {
-
-        // Transform the entire mesh vertex set.
-        for v, i in mesh.vertices {
-            v_out := VS_Out {
-                position = transform_vertex(v, transform),
-                normal   = v.normal,
-                uv       = v.uv,
-            }
-            vertex_cache[i] = v_out
-        }
-
-        // TODO: Submit batch when enough has been placed into the cache
-        // TODO: The tail batch would then submit in end_rendering
-        // TODO: Rasterization could also possible be eager processed with temp allocator/arena
-    }
-
-    // Process each triangle.
-    if PROFILE_SCOPED_EVENT(#procedure + ":process") {
-
-        VERTEX_BATCH_SIZE :: 16384 * 3 // 16K triangles per batch
-
-        for i := 0; i < len(mesh.indices); i += VERTEX_BATCH_SIZE {
-
-            sync.wait_group_add(&_ctx.renderer.wait_group, 1)
-            thread.pool_add_task(
-                &_ctx.pool,
-                context.allocator,
-                process_triangle_task,
-                new_clone(
-                    Triangle_Task_Info {
-                        mesh = mesh,
-                        image = image,
-                        vertices = vertex_cache,
-                        begin = i,
-                        end = min(i + VERTEX_BATCH_SIZE, len(mesh.indices) - 1),
-                    },
-                    context.temp_allocator,
-                ),
-            )
-        }
+    // Process batches of triangles in threads.
+    for i := 0; i < len(mesh.indices); i += BATCH_SIZE {
+        run_async(
+            process_triangle_task,
+            &_ctx.renderer.wait_group,
+            Triangle_Task_Info {
+                mesh = mesh,
+                image = image,
+                begin = i,
+                end = min(i + BATCH_SIZE, len(mesh.indices) - 1),
+                transform = transform,
+            },
+        )
     }
 
     Triangle_Task_Info :: struct {
-        mesh:     Mesh,
-        image:    ^Image,
-        vertices: []VS_Out,
-        begin:    int,
-        end:      int,
+        mesh:      Mesh,
+        image:     ^Image,
+        begin:     int,
+        end:       int,
+        transform: Matrix,
     }
 
     process_triangle_task :: proc(task: thread.Task) {
-        info := cast(^Triangle_Task_Info)task.data
+        using info := cast(^Triangle_Task_Info)task.data
 
         PROFILE_SCOPED_EVENT(#procedure)
 
@@ -213,28 +185,35 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
         batch: [dynamic]Triangle
         clear(&batch)
 
-        defer sync.wait_group_done(&_ctx.renderer.wait_group)
-
-        for i := info.begin; i < info.end; i += 3 {
-            a := info.vertices[info.mesh.indices[i + 0]]
-            b := info.vertices[info.mesh.indices[i + 2]]
-            c := info.vertices[info.mesh.indices[i + 1]]
-            process_triangle({a, b, c}, info.image, &batch)
+        for i := begin; i < end; i += 3 {
+            a := compute_vertex(mesh.vertices[mesh.indices[i + 0]], transform)
+            b := compute_vertex(mesh.vertices[mesh.indices[i + 2]], transform) // TODO: ???
+            c := compute_vertex(mesh.vertices[mesh.indices[i + 1]], transform)
+            process_triangle({a, b, c}, image, &batch)
         }
 
-        // Submit triangle batch...
-        // TODO: Is it possible to safely assign these triangles to the raster tiles?
-        //       Compute local cluters, then atomic lock and append?
+        // Submit triangle batch to rasterizer pending list.
+        // TODO: Is it possible to safely assign these triangles directly to the raster tiles?
+        //       Compute local clusters, then atomic lock and append?
         sync.guard(&_ctx.renderer.triangles_mutex)
-        for triangle in batch {
-            append(&_ctx.renderer.triangles, triangle)
-        }
+        append(&_ctx.renderer.triangles, ..batch[:])
+
+        sync.wait_group_done(&_ctx.renderer.wait_group)
     }
 
     transform_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (clip_position: Vector4) {
         clip_position.xyz = vertex.position
         clip_position.w = 1.0
         return transform * clip_position
+    }
+
+    compute_vertex :: proc "contextless" (vertex: Vertex, transform: Matrix) -> (out: VS_Out) {
+        out = VS_Out {
+            position = transform_vertex(vertex, transform),
+            normal   = vertex.normal,
+            uv       = vertex.uv,
+        }
+        return
     }
 }
 

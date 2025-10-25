@@ -89,7 +89,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
         for y in max(0, co_min.y) ..< min(co_max.y, _ctx.renderer.tile_count.y) {
             for x in max(0, co_min.x) ..< min(co_max.x, _ctx.renderer.tile_count.x) {
                 tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
-                append_elem(&tile.triangles, triangle)
+                append(&tile.triangles, triangle)
             }
         }
     }
@@ -99,26 +99,22 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
         PROFILE_SCOPE_BEGIN(#procedure + ":launch")
 
-        Task_Info :: struct {
+        Rasterize_Task_Info :: struct {
             renderer: ^Renderer,
             tile:     ^Raster_Tile,
         }
 
-        n_tiles: int
-        for &tile in renderer.tiles {
-            n_tiles += cast(int)(len(tile.triangles) > 0)
-        }
-
         // Schedule rendering each tile.
-        sync.wait_group_add(&renderer.wait_group, n_tiles)
         for &tile in renderer.tiles {
             if len(tile.triangles) == 0 do continue
-
-            info := Task_Info {
-                renderer = renderer,
-                tile     = &tile,
-            }
-            thread.pool_add_task(&_ctx.pool, {}, process_tile, new_clone(info, context.temp_allocator))
+            run_async(
+                rasterize_tile_task,
+                &renderer.wait_group,
+                Rasterize_Task_Info {     //
+                    renderer = renderer,
+                    tile     = &tile,
+                },
+            )
         }
 
         PROFILE_SCOPE_END()
@@ -137,7 +133,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
 
         PROFILE_SCOPE_END()
 
-        process_tile :: proc(task: thread.Task) {
+        rasterize_tile_task :: proc(task: thread.Task) {
 
             PROFILE_SCOPED_EVENT(#procedure)
 
@@ -145,7 +141,7 @@ flush_renderer :: proc(renderer: ^Renderer) {
             context.temp_allocator = {}
             context.allocator = {}
 
-            info := cast(^Task_Info)task.data
+            info := cast(^Rasterize_Task_Info)task.data
             for triangle in info.tile.triangles {
                 rasterize_triangle(triangle, info.tile.min, info.tile.max)
             }
@@ -422,4 +418,16 @@ compute_triangle_bounds :: proc "contextless" (triangle: Triangle) -> (r_min, r_
 @(private = "file")
 signed_area :: proc "contextless" (a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+@(private)
+run_async :: #force_inline proc(task: thread.Task_Proc, group: ^sync.Wait_Group, data: $D) {
+
+    PROFILE_SCOPED_EVENT(#procedure)
+
+    assert(group != nil)
+    assert(task != nil)
+
+    sync.wait_group_add(group, 1)
+    thread.pool_add_task(&_ctx.pool, context.allocator, task, new_clone(data, context.temp_allocator))
 }

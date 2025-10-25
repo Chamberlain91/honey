@@ -48,15 +48,19 @@ initalize :: proc(width, height: int, title: string, scale: f32 = 1.0, target_fp
 
     // Construct screen image.
     {
-        img := ray.GenImageColor(cast(c.int)width, cast(c.int)height, ray.RED)
-        defer ray.UnloadImage(img)
-
         aspect := cast(f32)width / cast(f32)height
         thread_split := cast(int)(cast(f32)len(_ctx.pool.threads) / aspect)
 
         _ctx.framebuffer = allocate_framebuffer({width, height})
         _ctx.renderer = create_renderer(height / thread_split)
-        texture_ = ray.LoadTextureFromImage(img)
+
+        texture_description := ray.Image {
+            width   = cast(c.int)width,
+            height  = cast(c.int)height,
+            mipmaps = 1,
+            format  = .UNCOMPRESSED_R8G8B8A8,
+        }
+        texture_ = ray.LoadTextureFromImage(texture_description)
     }
 }
 
@@ -96,10 +100,13 @@ window_flush_content :: proc() {
     PROFILE_SCOPED_EVENT(#procedure)
 
     // Update texture with image contents.
+    PROFILE_SCOPE_BEGIN(#procedure + ":to_texture")
     ray.UpdateTexture(texture_, raw_data(_ctx.framebuffer.color))
+    PROFILE_SCOPE_END()
 
     // Flush texture to the screen
     // Draw the texture flipped to that 0,0 image coordinates is bottom-left.
+    PROFILE_SCOPE_BEGIN(#procedure + ":to_window")
     ray.BeginDrawing()
 
     ray.ClearBackground(ray.BLACK)
@@ -124,6 +131,22 @@ window_flush_content :: proc() {
     }
 
     ray.EndDrawing()
+    PROFILE_SCOPE_END()
+}
+
+// Enables profile capture (writes to "profile.spall" file).
+enable_profile_capture :: proc(enable: bool) {
+    ENABLE_PROFILE_CAPTURE(enable)
+}
+
+// Begin a profile scope.
+profile_begin :: #force_inline proc(name: string, loc := #caller_location) {
+    PROFILE_SCOPE_BEGIN(name, loc)
+}
+
+// End a profile scope.
+profile_end :: #force_inline proc() {
+    PROFILE_SCOPE_END()
 }
 
 Vector2 :: [2]f32

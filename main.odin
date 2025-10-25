@@ -28,7 +28,12 @@ main :: proc() {
 
     // Main loop.
     main_loop: for honey.is_window_open() {
-        defer free_all(context.temp_allocator)
+
+        // Capture only a single frame when pressing 'end' key.
+        honey.enable_profile_capture(honey.is_key_pressed(.END))
+
+        honey.profile_begin(#procedure + ":loop")
+        defer honey.profile_end()
 
         camera_dir: honey.Vector3 = {
             math.cos(camera_heading) * math.cos(camera_pitch),

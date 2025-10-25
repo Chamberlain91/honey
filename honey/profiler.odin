@@ -7,45 +7,43 @@ package honey
 @(require) import "core:prof/spall"
 @(require) import "core:sync"
 
-ENALBE_SPALL_PROFILER :: #config(PROFILE, false)
+ENABLE_SPALL_PROFILER :: #config(PROFILE, false)
 
-@(disabled = !ENALBE_SPALL_PROFILER, private = "package")
+@(disabled = !ENABLE_SPALL_PROFILER, private = "package")
 PROFILE_SCOPE_BEGIN :: proc "contextless" (name: string, loc := #caller_location) {
-    if !spall_enable do return
+    if !spall_capture do return
     spall._buffer_begin(&spall_context, spall_get_buffer(), name, location = loc)
 }
 
-@(disabled = !ENALBE_SPALL_PROFILER, private = "package")
+@(disabled = !ENABLE_SPALL_PROFILER, private = "package")
 PROFILE_SCOPE_END :: proc "contextless" () {
-    if !spall_enable do return
+    if !spall_capture do return
     spall._buffer_end(&spall_context, spall_get_buffer())
 }
 
 @(deferred_none = PROFILE_SCOPE_END, private = "package")
 PROFILE_SCOPED_EVENT :: proc "contextless" (name: string, loc := #caller_location) -> bool {
-    if !spall_enable do return true
-    when ENALBE_SPALL_PROFILER {
-        PROFILE_SCOPE_BEGIN(name, loc)
-    }
+    if !spall_capture do return true
+    PROFILE_SCOPE_BEGIN(name, loc)
     return true
 }
 
-@(private = "package", disabled = !ENALBE_SPALL_PROFILER)
-enable_profiling :: proc "contextless" (enable: bool) {
-    spall_enable = enable
+@(private = "package", disabled = !ENABLE_SPALL_PROFILER)
+ENABLE_PROFILE_CAPTURE :: proc "contextless" (enable: bool) {
+    spall_capture = enable
 }
 
 spall_context: spall.Context
 spall_buffers: [dynamic]^spall.Buffer
-spall_enable: bool
+spall_capture: bool
 
-when ENALBE_SPALL_PROFILER {
+when ENABLE_SPALL_PROFILER {
 
     @(init, no_instrumentation)
     _spall_static_init :: proc "contextless" () {
         context = runtime.default_context()
         spall_context = spall.context_create("profile.spall")
-        
+
         context = runtime.default_context()
         fmt.printfln("[INFO] Initialized spall.")
     }
@@ -67,7 +65,7 @@ when ENALBE_SPALL_PROFILER {
 @(no_instrumentation)
 spall_get_buffer :: proc "contextless" () -> ^spall.Buffer {
 
-    when ENALBE_SPALL_PROFILER {
+    when ENABLE_SPALL_PROFILER {
 
         @(thread_local)
         spall_buffer: spall.Buffer
