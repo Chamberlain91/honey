@@ -30,36 +30,18 @@ _initialize_profiler :: proc(allocator: mem.Allocator) -> mem.Allocator {
     }
 }
 
+@(disabled = !ENABLE_TRACY_PROFILER)
 _profiler_set_thread_name :: proc(name: cstring) {
-
-    when ENABLE_TRACY_PROFILER {
-
-        tracy.SetThreadName(name)
-
-    }
+    tracy.SetThreadName(name)
 }
 
+@(disabled = !ENABLE_TRACY_PROFILER)
 _profiler_mark_frame :: proc(name: cstring = nil) {
-
-    when ENABLE_TRACY_PROFILER {
-
-        if !_capture do return
-        tracy.FrameMark(name)
-
-    }
+    if !_capture do return
+    tracy.FrameMark(name)
 }
 
-when ENABLE_TRACY_PROFILER {
-
-    _profiler_zone :: tracy.ZoneN
-
-} else {
-
-    _profiler_zone :: proc(name: string) {
-        // Nothing
-    }
-
-}
+_profiler_zone :: tracy.ZoneN
 
 enable_profile_capture :: proc(enable: bool) {
     _capture = enable
@@ -67,17 +49,23 @@ enable_profile_capture :: proc(enable: bool) {
 
 @(deferred_in = profile_scope_end)
 profile_scoped_event :: #force_inline proc "contextless" (name: string, loc := #caller_location) -> bool {
-    if !_capture do return true
-    profile_scope_begin(name, loc)
+    when ENABLE_TRACY_PROFILER {
+        if !_capture do return true
+        profile_scope_begin(name, loc)
+    }
     return true
 }
 
+@(disabled = !ENABLE_TRACY_PROFILER)
 profile_scope_begin :: #force_inline proc "contextless" (name: string, loc := #caller_location) {
     if !_capture do return
     context = runtime.default_context()
-    append(&_zones, tracy.ZoneBegin(true, tracy.TRACY_CALLSTACK, loc))
+    zctx := tracy.ZoneBegin(true, tracy.TRACY_CALLSTACK, loc)
+    tracy.ZoneName(zctx, name)
+    append(&_zones, zctx)
 }
 
+@(disabled = !ENABLE_TRACY_PROFILER)
 profile_scope_end :: #force_inline proc "contextless" (_: string = "", loc := #caller_location) {
     if !_capture do return
     context = runtime.default_context()

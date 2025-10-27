@@ -1,7 +1,6 @@
 #+private
 package honey
 
-import "base:runtime"
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
@@ -443,7 +442,7 @@ run_async :: #force_inline proc(task: proc "contextless" (data: $D), group: ^syn
     sync.wait_group_add(group, 1)
 
     // Submit that unit of work.
-    thread.pool_add_task(&_ctx.pool, context.allocator, do_task, new_clone(task_info, context.allocator))
+    thread.pool_add_task(&_ctx.pool, context.allocator, do_task, new_clone(task_info, context.temp_allocator))
 
     do_task :: proc(task: thread.Task) {
 
@@ -453,8 +452,5 @@ run_async :: #force_inline proc(task: proc "contextless" (data: $D), group: ^syn
 
         // That unit of work is complete.
         sync.wait_group_done(info.group)
-
-        // Free the task parameters.
-        free(info)
     }
 }

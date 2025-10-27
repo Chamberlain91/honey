@@ -37,8 +37,7 @@ thread_init :: proc() {
     )
     fmt.printfln("[SYSTEM] RAM: {:M}", sysinfo.ram.total_ram)
 
-    // We use N - 1 to give leeway for the main thread.
-    thread.pool_init(&_ctx.pool, context.allocator, max(3, sysinfo.cpu.logical_cores - 1))
+    thread.pool_init(&_ctx.pool, context.allocator, max(2, sysinfo.cpu.logical_cores))
     thread.pool_start(&_ctx.pool)
 
     fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))
@@ -156,7 +155,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Texture, transform: Matrix) #no_bo
 
     profile_scoped_event(#procedure)
 
-    BATCH_SIZE :: 1024 * 3
+    BATCH_SIZE :: 2048 * 3
 
     // Process batches of triangles in threads.
     for i := 0; i < len(mesh.indices); i += BATCH_SIZE {
@@ -376,7 +375,7 @@ VS_Out :: struct {
 @(private)
 Triangle :: struct {
     vertices: [3]VS_Out,
-    texture:    ^Texture,
+    texture:  ^Texture,
     min, max: Vector2i,
 }
 
