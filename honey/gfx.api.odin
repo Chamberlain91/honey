@@ -38,7 +38,7 @@ thread_init :: proc() {
     fmt.printfln("[SYSTEM] RAM: {:M}", sysinfo.ram.total_ram)
 
     // We use N - 1 to give leeway for the main thread.
-    thread.pool_init(&_ctx.pool, context.allocator, sysinfo.cpu.logical_cores - 1)
+    thread.pool_init(&_ctx.pool, context.allocator, max(3, sysinfo.cpu.logical_cores - 1))
     thread.pool_start(&_ctx.pool)
 
     fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))
@@ -104,15 +104,15 @@ get_toggle :: proc "contextless" (toggle: Toggle) -> bool {
 // Begins rendering, clearing the framebuffer.
 begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
-    if PROFILE_SCOPED_EVENT(#procedure + ":color") {
+    if profile_scoped_event(#procedure + ":color") {
         // TODO: Perhaps slice.zero (much faster)
         // slice.fill(_ctx.framebuffer.color, color)
         slice.zero(_ctx.framebuffer.color)
     }
 
-    if PROFILE_SCOPED_EVENT(#procedure + ":depth") {
+    if profile_scoped_event(#procedure + ":depth") {
         // TODO: Perhaps slice.zero (much faster)
         slice.fill(_ctx.framebuffer.depth, 1.0)
     }
@@ -127,7 +127,7 @@ begin_rendering :: proc(color := DEFAULT_CLEAR_COLOR) {
 // Ends rendering, flushing the framebuffer to the screen.
 end_rendering :: proc() {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
     // Wait for all triangles to be processed.
     sync.wait_group_wait(&_ctx.renderer.wait_group)
@@ -152,11 +152,11 @@ draw_model :: proc(model: Model, transform: Matrix) #no_bounds_check {
 }
 
 // Draws the specified mesh texture image.
-draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_bounds_check {
+draw_mesh_indexed :: proc(mesh: Mesh, image: ^Texture, transform: Matrix) #no_bounds_check {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
-    BATCH_SIZE :: 2048 * 3
+    BATCH_SIZE :: 1024 * 3
 
     // Process batches of triangles in threads.
     for i := 0; i < len(mesh.indices); i += BATCH_SIZE {
@@ -175,7 +175,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
     Triangle_Task_Info :: struct {
         mesh:      Mesh,
-        image:     ^Image,
+        image:     ^Texture,
         begin:     int,
         end:       int,
         transform: Matrix,
@@ -183,7 +183,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 
     process_triangle_task :: proc "contextless" (info: Triangle_Task_Info) {
 
-        PROFILE_SCOPED_EVENT(#procedure)
+        profile_scoped_event(#procedure)
 
         @(thread_local)
         batch: [dynamic]Triangle
@@ -224,7 +224,7 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Image, transform: Matrix) #no_boun
 @(private)
 process_triangle :: proc "contextless" (
     vertices: [3]VS_Out,
-    image: ^Image,
+    image: ^Texture,
     output: ^[dynamic]Triangle,
 ) #no_bounds_check {
 
@@ -300,7 +300,7 @@ process_triangle :: proc "contextless" (
         append_triangle(vB, c0, vA, image, output)
     }
 
-    append_triangle :: proc "contextless" (x0, x1, x2: VS_Out, image: ^Image, output: ^[dynamic]Triangle) {
+    append_triangle :: proc "contextless" (x0, x1, x2: VS_Out, image: ^Texture, output: ^[dynamic]Triangle) {
 
         v0, v1, v2 := map_to_viewport(x0), map_to_viewport(x1), map_to_viewport(x2)
 
@@ -310,8 +310,10 @@ process_triangle :: proc "contextless" (
             return
         }
 
+        v_min, v_max := compute_triangle_bounds(v0, v1, v2)
+
         context = runtime.default_context()
-        append(output, Triangle{{v0, v1, v2}, image})
+        append(output, Triangle{{v0, v1, v2}, image, v_min, v_max})
     }
 
     map_to_viewport :: proc "contextless" (vertex: VS_Out) -> VS_Out {
@@ -344,6 +346,18 @@ process_triangle :: proc "contextless" (
             return (p0[AXIS] * SIGN) > p0.w && (p1[AXIS] * SIGN) > p1.w && (p2[AXIS] * SIGN) > p2.w
         }
     }
+
+    compute_triangle_bounds :: proc "contextless" (v0, v1, v2: VS_Out) -> (v_min, v_max: Vector2i) {
+
+        p0 := la.array_cast(v0.position.xy, int)
+        p1 := la.array_cast(v1.position.xy, int)
+        p2 := la.array_cast(v2.position.xy, int)
+
+        v_min = la.min(p0, p1, p2)
+        v_max = la.max(p0, p1, p2)
+
+        return
+    }
 }
 
 // When `DEV_BUILD` is defined (e.g. debug builds) show this text as part of the overlay information.
@@ -362,7 +376,8 @@ VS_Out :: struct {
 @(private)
 Triangle :: struct {
     vertices: [3]VS_Out,
-    image:    ^Image,
+    texture:    ^Texture,
+    min, max: Vector2i,
 }
 
 @(private)

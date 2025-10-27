@@ -14,7 +14,10 @@ PITCH_LIMIT :: (math.PI / 2) * 0.9
 
 main :: proc() {
 
+    context.allocator = honey._initialize_profiler(context.allocator)
+
     when honey.DEV_BUILD {
+
         track: mem.Tracking_Allocator
         mem.tracking_allocator_init(&track, context.allocator)
         context.allocator = mem.tracking_allocator(&track)
@@ -61,12 +64,13 @@ main :: proc() {
     // Main loop.
     main_loop: for honey.is_window_open() {
         defer free_all(context.temp_allocator)
+        defer honey._profiler_mark_frame()
 
         // Capture only a single frame when pressing 'end' key.
         honey.enable_profile_capture(honey.is_key_pressed(.END))
 
-        honey.profile_begin(#procedure + ":loop")
-        defer honey.profile_end()
+        honey.profile_scope_begin(#procedure + ":loop")
+        defer honey.profile_scope_end()
 
         camera_dir: honey.Vector3 = {
             math.cos(camera_heading) * math.cos(camera_pitch),
@@ -82,8 +86,8 @@ main :: proc() {
 
         status := fmt.tprintf(
             "(Z) simd rasterization: {}\n(X) backface culling: {}\ntriangle count: {}\nvertex: {:.2f} ms\ndispatch: {:.2f} ms\nraster: {:.2f} ms",
-            honey.get_toggle(.Backface_Culling),
             !honey.get_toggle(.Disable_SIMD),
+            honey.get_toggle(.Backface_Culling),
             honey.get_triangle_count(),
             honey.get_vertex_duration(),
             honey.get_dispatch_duration(),

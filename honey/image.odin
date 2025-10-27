@@ -3,6 +3,8 @@ package honey
 import "core:bytes"
 import "core:fmt"
 import "core:image/png"
+import "core:math"
+import la "core:math/linalg"
 import "core:mem"
 import "core:simd"
 import "core:slice"
@@ -10,10 +12,10 @@ import "core:slice"
 Image :: struct {
     data: []Color,
     size: [2]int,
-    simd: struct {
-        begin: #simd[4]uintptr,
-        end:   #simd[4]uintptr,
-    },
+}
+
+Texture :: struct {
+    mips: []Image,
 }
 
 /// Loads and image from the specified path.
@@ -48,13 +50,70 @@ image_clone_aligned :: proc(pixels: []Color, w, h: int) -> Image {
     image := Image {
         data = aligned_memory,
         size = {w, h},
-        simd = {     //
-            begin = cast(uintptr)raw_data(aligned_memory),
-            end   = cast(uintptr)raw_data(aligned_memory) + cast(uintptr)(len(pixels) * size_of(Color)),
-        },
     }
 
     return image
+}
+
+to_texture :: proc(image: Image) -> Texture {
+
+    assert(image.size.x > 0)
+    assert(image.size.y > 0)
+    assert(image.data != nil)
+
+    // TODO: Actually compute mip maps
+
+    image := image
+
+    num_mips := 1 + cast(int)math.log2_f32(cast(f32)min(image.size.x, image.size.y))
+
+    texture := Texture {
+        mips = make([]Image, num_mips),
+    }
+
+    // Top level is norma image.
+    texture.mips[0] = image
+
+    // Compute lower mips by downsampling each time.
+    for i in 1 ..< len(texture.mips) {
+
+        // Allocate half size image.
+        half_memory, half_memory_ok := mem.make_aligned([]Color, len(image.data) / 4, 16)
+        panic_on_error(half_memory_ok)
+        mip_image := Image {
+            data = half_memory,
+            size = image.size / 2,
+        }
+
+        for y in 0 ..< mip_image.size.y {
+            for x in 0 ..< mip_image.size.x {
+
+                sample_coord := [2]int{x, y} * 2
+                samples: [4]Color = {
+                    image_get_pixel(image, expand_values(sample_coord + {0, 0})),
+                    image_get_pixel(image, expand_values(sample_coord + {1, 0})),
+                    image_get_pixel(image, expand_values(sample_coord + {1, 1})),
+                    image_get_pixel(image, expand_values(sample_coord + {0, 1})),
+                }
+
+                average: [4]int
+                for sample_index in 0 ..< 4 {
+                    for component in 0 ..< 4 {
+                        average[component] += cast(int)samples[sample_index][component]
+                    }
+                }
+                average /= 4
+
+                image_set_pixel(mip_image, x, y, cast(Color)la.array_cast(average, u8))
+            }
+        }
+
+        // Store half image and swap with reference image.
+        texture.mips[i] = mip_image
+        image = mip_image
+    }
+
+    return texture
 }
 
 // TODO: image_load_bytes, image_load_path, image_load group
@@ -98,31 +157,44 @@ image_sample :: proc "contextless" (image: Image, uv: [2]f32) -> Color #no_bound
     }
 }
 
+@(private)
+texture_sample :: proc "contextless" (texture: Texture, level: int, uv: [2]f32) -> Color #no_bounds_check {
+    return image_sample(texture.mips[level], uv)
+}
+
 // Nearest sample an image using SIMD operations.
 @(private)
 image_sample_simd :: proc "contextless" (image: Image, U, V: #simd[4]f32) -> #simd[4]u32 #no_bounds_check {
 
     // Computes the offset within the image data.
-    xs := cast(#simd[4]i32)(wrap(U) * cast(f32)(image.size.x - 1))
-    ys := cast(#simd[4]i32)(wrap(V) * cast(f32)(image.size.y - 1))
-    offsets := (ys * cast(i32)image.size.x) + xs
+    xs := cast(#simd[4]i32)(wrap(U) * cast(f32)image.size.x)
+    ys := cast(#simd[4]i32)(wrap(V) * cast(f32)image.size.y)
+
+    // Computes the addresses to gather image data from.
+    byte_offsets := cast(#simd[4]uintptr)(to_offset(image, xs, ys) * size_of(Color))
+    begin := cast(#simd[4]uintptr)raw_data(image.data)
+    ptrs := transmute(#simd[4]rawptr)(begin + byte_offsets)
 
     // Read the requested image data.
-    // TODO: https://github.com/odin-lang/Odin/issues/5737
-    addrs := image.simd.begin + cast(#simd[4]uintptr)(offsets * size_of(Color))
-    // Ensure pointers valid to access.
-    addrs = simd.clamp(addrs, image.simd.begin, image.simd.end)
-
-    return simd.gather(cast(#simd[4]rawptr)addrs, (#simd[4]u32)(0), (#simd[4]u32)(1))
+    return simd.gather(ptrs, cast(#simd[4]u32)0, cast(#simd[4]bool)true)
 
     wrap :: proc "contextless" (x: #simd[4]f32) -> #simd[4]f32 {
-
-        // frac := x - floo(x)
-        // addo := (frac < 0) ? 1 : 0
-        // return frac + addo
-
         frac := x - simd.floor(x)
         add_one := transmute(#simd[4]f32)(simd.lanes_lt(frac, 0) & transmute(u32)f32(1.0))
         return frac + add_one
     }
+
+    to_offset :: proc "contextless" (image: Image, xs, ys: #simd[4]i32) -> #simd[4]i32 {
+        offset := (ys * cast(i32)image.size.x) + xs
+        return simd.clamp(offset, 0, cast(#simd[4]i32)len(image.data))
+    }
+}
+
+@(private)
+texture_sample_simd :: proc "contextless" (
+    texture: Texture,
+    level: int,
+    U, V: #simd[4]f32,
+) -> #simd[4]u32 #no_bounds_check {
+    return image_sample_simd(texture.mips[level], U, V)
 }

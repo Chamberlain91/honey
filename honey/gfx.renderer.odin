@@ -1,7 +1,9 @@
 #+private
 package honey
 
+import "base:runtime"
 import "core:fmt"
+import "core:math"
 import la "core:math/linalg"
 import "core:simd"
 import "core:sync"
@@ -75,94 +77,84 @@ delete_renderer :: proc(renderer: Renderer) {
 
 flush_renderer :: proc(renderer: ^Renderer) {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
     dispatch_start_time := time.now()
 
     // Submit triangle to overlapping tiles.
-    PROFILE_SCOPE_BEGIN("submit_to_tiles")
+    profile_scope_begin(#procedure + ":submit_to_tiles")
     for &triangle in renderer.triangles {
         submit_to_tiles(renderer, &triangle)
     }
-    PROFILE_SCOPE_END()
+    profile_scope_end()
 
-    dispatch_tiles(&_ctx.renderer, dispatch_start_time)
+    profile_scope_begin(#procedure + ":launch")
+
+    Rasterize_Task_Info :: struct {
+        renderer: ^Renderer,
+        tile:     ^Raster_Tile,
+    }
+
+    // Schedule rendering each tile.
+    for &tile in renderer.tiles {
+        if len(tile.triangles) == 0 do continue
+        run_async(
+            rasterize_tile_task,
+            &renderer.wait_group,
+            Rasterize_Task_Info {     //
+                renderer = renderer,
+                tile     = &tile,
+            },
+        )
+    }
+
+    profile_scope_end()
+    profile_scope_begin(#procedure + ":wait")
+
+    // Record the time since start of submit and dispatch of tiles.
+    update_stat(&_ctx.stats.dispatch_duration, time.since(dispatch_start_time))
+
+    rasterization_start_time := time.now()
+
+    // Wait for all tiles to complete.
+    sync.wait_group_wait(&renderer.wait_group)
+
+    // Record the time spend waiting for rasterization tasks.
+    update_stat(&_ctx.stats.rasterization_duration, time.since(rasterization_start_time))
+
+    profile_scope_end()
 
     submit_to_tiles :: proc(renderer: ^Renderer, triangle: ^Triangle) #no_bounds_check {
 
-        triangle_min, triangle_max := compute_triangle_bounds(triangle^)
-
         // Compute the rectangular range of overlapping tiles.
-        co_min := (triangle_min) / renderer.tile_size
-        co_max := (triangle_max + (renderer.tile_size - 1)) / renderer.tile_size
+        co_min := (triangle.min) / renderer.tile_size
+        co_max := (triangle.max + (renderer.tile_size - 1)) / renderer.tile_size
 
-        for y in max(0, co_min.y) ..< min(co_max.y, _ctx.renderer.tile_count.y) {
-            for x in max(0, co_min.x) ..< min(co_max.x, _ctx.renderer.tile_count.x) {
+        for y in max(0, co_min.y) ..< min(co_max.y, renderer.tile_count.y) {
+            for x in max(0, co_min.x) ..< min(co_max.x, renderer.tile_count.x) {
                 tile := &renderer.tiles[compute_index(x, y, renderer.tile_count.x)]
                 append(&tile.triangles, triangle)
             }
         }
     }
 
-    // Blocks to ensure all rendering of tiles have completed.
-    dispatch_tiles :: proc(renderer: ^Renderer, dispatch_start_time: time.Time) {
+    rasterize_tile_task :: proc "contextless" (info: Rasterize_Task_Info) {
 
-        PROFILE_SCOPE_BEGIN(#procedure + ":launch")
+        profile_scoped_event(#procedure)
 
-        Rasterize_Task_Info :: struct {
-            renderer: ^Renderer,
-            tile:     ^Raster_Tile,
+        for triangle in info.tile.triangles {
+            rasterize_triangle(triangle, info.tile.min, info.tile.max)
         }
 
-        // Schedule rendering each tile.
-        for &tile in renderer.tiles {
-            if len(tile.triangles) == 0 do continue
-            run_async(
-                rasterize_tile_task,
-                &renderer.wait_group,
-                Rasterize_Task_Info {     //
-                    renderer = renderer,
-                    tile     = &tile,
-                },
-            )
-        }
-
-        PROFILE_SCOPE_END()
-        PROFILE_SCOPE_BEGIN(#procedure + ":wait")
-
-        // Record the time since start of submit and dispatch of tiles.
-        update_stat(&_ctx.stats.dispatch_duration, time.since(dispatch_start_time))
-
-        rasterization_start_time := time.now()
-
-        // Wait for all tiles to complete.
-        sync.wait_group_wait(&renderer.wait_group)
-
-        // Record the time spend waiting for rasterization tasks.
-        update_stat(&_ctx.stats.rasterization_duration, time.since(rasterization_start_time))
-
-        PROFILE_SCOPE_END()
-
-        rasterize_tile_task :: proc "contextless" (info: Rasterize_Task_Info) {
-
-            PROFILE_SCOPED_EVENT(#procedure)
-
-            for triangle in info.tile.triangles {
-                rasterize_triangle(triangle, info.tile.min, info.tile.max)
-            }
-
-            clear(&info.tile.triangles)
-        }
+        clear(&info.tile.triangles)
     }
 }
 
 @(private)
 rasterize_triangle :: proc "contextless" (triangle: ^Triangle, range_min, range_max: Vector2i) #no_bounds_check {
 
-    PROFILE_SCOPED_EVENT(#procedure)
-
     // Clamp rasterization to range (preventing out-of-bounds access & raster "clipping planes")
-    triangle_min, triangle_max := compute_triangle_bounds(triangle^)
+    triangle_min, triangle_max := triangle.min, triangle.max
     triangle_min = la.clamp(triangle_min, range_min, range_max)
     triangle_max = la.clamp(triangle_max, range_min, range_max)
 
@@ -185,6 +177,14 @@ rasterize_triangle_normal :: proc "contextless" (
 
     // Precompuse inverse area to optimize interpolation.
     inv_area := 1.0 / signed_area(p0.xy, p1.xy, p2.xy)
+
+    // Computes mip level by approximation of triangle screen area rather than uv gradient.
+    uv_size := la.array_cast(triangle.texture.mips[0].size, f32)
+    lod_ratio := abs(signed_area(v0.uv * uv_size, v1.uv * uv_size, v2.uv * uv_size)) * inv_area
+    lod := max(0.0, math.log2(lod_ratio) * 0.5)
+
+    mip_level := cast(int)math.floor(lod + 0.5)
+    mip_level = clamp(mip_level, 0, len(triangle.texture.mips) - 1)
 
     // Barycentric interpolation starting points.
     v_min := la.array_cast(triangle_min.xy, f32)
@@ -236,7 +236,7 @@ rasterize_triangle_normal :: proc "contextless" (
 
             // ---- FRAGMENT SHADER BEGIN ---
 
-            pixel := image_sample(triangle.image^, fragment_uv)
+            pixel := texture_sample(triangle.texture^, mip_level, fragment_uv)
             if pixel.a == 0 {
                 continue // alphg clipping (discard pixel)
             }
@@ -267,10 +267,18 @@ rasterize_triangle_simd :: proc "contextless" (
     v0, v1, v2 := expand_values(triangle.vertices)
     p0, p1, p2 := v0.position, v1.position, v2.position
 
-    STEP_SIZES :: (#simd[4]f32){0, 1, 2, 3}
+    STEP_SIZES: #simd[4]f32 : {0, 1, 2, 3}
 
     // Precompuse inverse area to optimize interpolation.
     inv_area := 1.0 / signed_area(p0.xy, p1.xy, p2.xy)
+
+    // Computes mip level by approximation of triangle screen area rather than uv gradient.
+    uv_size := la.array_cast(triangle.texture.mips[0].size, f32)
+    lod_ratio := abs(signed_area(v0.uv * uv_size, v1.uv * uv_size, v2.uv * uv_size)) * inv_area
+    lod := max(0.0, math.log2(lod_ratio) * 0.5)
+
+    mip_level := cast(int)math.floor(lod + 0.5)
+    mip_level = clamp(mip_level, 0, len(triangle.texture.mips) - 1)
 
     // SIMD reads and writes need to be 16 byte aligned.
     align_min_x := align_backward(triangle_min.x, 4)
@@ -354,10 +362,10 @@ rasterize_triangle_simd :: proc "contextless" (
 
             // ---- FRAGMENT SHADER BEGIN ---
 
-            R, G, B, A := convert_u32_to_f32_simd(image_sample_simd(triangle.image^, U, V))
+            R, G, B, A := convert_u32_to_f32_simd(texture_sample_simd(triangle.texture^, mip_level, U, V))
             write_mask = write_mask & simd.lanes_ne(A, 0) // alpha clipping (discard pixel)
 
-            brightness := 0.25 + (simd.max((#simd[4]f32)(0), dot(NX, NY, NZ, _ctx.sun_direction)) * 0.75)
+            brightness := 0.25 + (simd.max(cast(#simd[4]f32)0, dot(NX, NY, NZ, _ctx.sun_direction)) * 0.75)
 
             R *= brightness
             G *= brightness
@@ -407,19 +415,6 @@ rasterize_triangle_simd :: proc "contextless" (
 }
 
 @(private = "file")
-compute_triangle_bounds :: proc "contextless" (triangle: Triangle) -> (r_min, r_max: Vector2i) {
-
-    p0 := la.array_cast(triangle.vertices[0].position.xy, int)
-    p1 := la.array_cast(triangle.vertices[1].position.xy, int)
-    p2 := la.array_cast(triangle.vertices[2].position.xy, int)
-
-    r_min = la.min(p0, p1, p2)
-    r_max = la.max(p0, p1, p2)
-
-    return
-}
-
-@(private = "file")
 signed_area :: proc "contextless" (a, b, c: [2]f32) -> f32 {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
@@ -427,7 +422,7 @@ signed_area :: proc "contextless" (a, b, c: [2]f32) -> f32 {
 @(private)
 run_async :: #force_inline proc(task: proc "contextless" (data: $D), group: ^sync.Wait_Group, data: D) {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
     assert(group != nil)
     assert(task != nil)

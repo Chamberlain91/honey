@@ -100,16 +100,16 @@ window_size :: proc() -> Vector2i {
 @(private)
 window_flush_content :: proc() {
 
-    PROFILE_SCOPED_EVENT(#procedure)
+    profile_scoped_event(#procedure)
 
     // Update texture with image contents.
-    PROFILE_SCOPE_BEGIN(#procedure + ":to_texture")
+    profile_scope_begin(#procedure + ":to_texture")
     ray.UpdateTexture(texture_, raw_data(_ctx.framebuffer.color))
-    PROFILE_SCOPE_END()
+    profile_scope_end()
 
     // Flush texture to the screen
     // Draw the texture flipped to that 0,0 image coordinates is bottom-left.
-    PROFILE_SCOPE_BEGIN(#procedure + ":to_window")
+    profile_scope_begin(#procedure + ":to_window")
     ray.BeginDrawing()
 
     ray.ClearBackground(ray.BLACK)
@@ -134,22 +134,7 @@ window_flush_content :: proc() {
     }
 
     ray.EndDrawing()
-    PROFILE_SCOPE_END()
-}
-
-// Enables profile capture (writes to "profile.spall" file).
-enable_profile_capture :: proc(enable: bool) {
-    ENABLE_PROFILE_CAPTURE(enable)
-}
-
-// Begin a profile scope.
-profile_begin :: #force_inline proc(name: string, loc := #caller_location) {
-    PROFILE_SCOPE_BEGIN(name, loc)
-}
-
-// End a profile scope.
-profile_end :: #force_inline proc() {
-    PROFILE_SCOPE_END()
+    profile_scope_end()
 }
 
 Vector2 :: [2]f32

@@ -9,18 +9,8 @@ import "core:strconv"
 import "core:strings"
 
 Model :: struct {
-    textures: []Image,
+    textures: []Texture,
     meshes:   []Mesh,
-}
-
-destroy_model :: proc(model: Model) {
-    for m in model.meshes {
-        delete(m.vertices)
-        delete(m.indices)
-    }
-    for m in model.textures {
-        delete(m.data)
-    }
 }
 
 delete_model :: proc(model: Model) {
@@ -29,8 +19,11 @@ delete_model :: proc(model: Model) {
         delete(mesh.indices)
     }
     delete(model.meshes)
-    for image in model.textures {
-        delete(image.data)
+    for tex in model.textures {
+        for img in tex.mips {
+            delete(img.data)
+        }
+        delete(tex.mips)
     }
     delete(model.textures)
 }
@@ -53,7 +46,7 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
 
     texture_lookup: map[string]int
     defer delete(texture_lookup)
-    textures: []Image
+    textures: []Texture
 
     builders: []Mesh_Builder
     defer delete(builders)
@@ -72,7 +65,7 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
     panic_on_error(data_ok)
     defer delete(data)
 
-    material: ^Image
+    material: ^Texture
     builder: ^Mesh_Builder
 
     text_it := cast(string)data
@@ -252,7 +245,7 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
 }
 
 @(private)
-load_wavefront_materials :: proc(path: string) -> (textures: []Image, textures_lookup: map[string]int) {
+load_wavefront_materials :: proc(path: string) -> (textures: []Texture, textures_lookup: map[string]int) {
 
     dir, _ := filepath.split(path)
 
@@ -294,15 +287,15 @@ load_wavefront_materials :: proc(path: string) -> (textures: []Image, textures_l
         }
     }
 
-    textures = make([]Image, len(materials))
+    textures = make([]Texture, len(materials))
 
     index: int
     for material_name, material_path in materials {
         if material_path == "" {
             fmt.eprintfln("[WARN] Material '{}' did not have a texture, defaulting to 1x1 white.", material_name)
-            textures[index] = image_clone_aligned({WHITE}, 1, 1)
+            textures[index] = to_texture(image_clone_aligned({WHITE}, 1, 1))
         } else {
-            textures[index] = image_load(material_path)
+            textures[index] = to_texture(image_load(material_path))
         }
         textures_lookup[material_name] = index
         index += 1
