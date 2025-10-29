@@ -51,10 +51,12 @@ main :: proc() {
     defer honey.shutdown()
 
     // Load the models.
-    character := honey.load_wavefront_model("assets/NexoITCH.obj", scale = 0.75)
-    defer honey.delete_model(character)
+    // character := honey.load_wavefront_model("assets/NexoITCH.obj", scale = 0.75)
+    // defer honey.delete_model(character)
     sponza := honey.load_wavefront_model("assets/sponza.obj", scale = 0.01)
     defer honey.delete_model(sponza)
+    character := honey.load_gltf_model("assets/NexoITCH.glb", scale = 0.75)
+    defer honey.delete_model(character)
 
     // default position within sponza.obj
     camera_position: honey.Vector3 = {-10.8, 0.57, 1.0}

@@ -19,7 +19,20 @@ Texture :: struct {
 }
 
 /// Loads and image from the specified path.
-image_load :: proc(_path: string) -> Image {
+image_load_bytes :: proc(data: []byte) -> Image {
+
+    fmt.printfln("[INFO] Reading image from {} bytes", len(data))
+
+    image, image_err := png.load_from_bytes(data, png.Options{.alpha_add_if_missing})
+    panic_on_error(image_err)
+    defer png.destroy(image)
+
+    pixels := slice.reinterpret([]Color, bytes.buffer_to_bytes(&image.pixels))
+    return image_clone_aligned(pixels, image.width, image.height)
+}
+
+/// Loads and image from the specified path.
+image_load_path :: proc(_path: string) -> Image {
 
     path, path_err := normalize_path_slash(_path, context.temp_allocator)
     panic_on_error(path_err)
@@ -30,9 +43,7 @@ image_load :: proc(_path: string) -> Image {
     panic_on_error(image_err)
     defer png.destroy(image)
 
-    data := cast(^Color)raw_data(bytes.buffer_to_bytes(&image.pixels))
-    pixels := slice.from_ptr(data, image.width * image.height)
-
+    pixels := slice.reinterpret([]Color, bytes.buffer_to_bytes(&image.pixels))
     return image_clone_aligned(pixels, image.width, image.height)
 }
 

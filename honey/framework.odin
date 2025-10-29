@@ -1,5 +1,6 @@
 package honey
 
+import "base:intrinsics"
 import "core:c"
 import "core:fmt"
 import "core:mem"
@@ -224,7 +225,7 @@ mouse_down :: proc(button: Mouse_Button) -> bool {
 
 @(private)
 panic_on_error :: proc(err: $E, loc := #caller_location) {
-    when E == bool {
+    when intrinsics.type_is_boolean(E) {
         if !err {
             fmt.panicf("[ERROR] Encountered OK: {}", err, loc = loc)
         }

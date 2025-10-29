@@ -7,6 +7,7 @@ import os "core:os/os2"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
+import "vendor:cgltf"
 
 Model :: struct {
     textures: []Texture,
@@ -30,7 +31,7 @@ delete_model :: proc(model: Model) {
 
 // Parse a Wavefront `*.obj` model format. This is rudementary!
 // This does not consider `*.mtl` files nor submeshes, smoothing groups, or other features.
-load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32 = 1.0, flip_uv := true) -> Model {
+load_wavefront_model :: proc(path: string, flip_winding := false, scale: f32 = 1.0, flip_uv := true) -> Model {
 
     positions: [dynamic]Vector3
     defer delete(positions)
@@ -165,8 +166,8 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
             for i in 1 ..< sa.len(faces) - 1 {
 
                 f0 := sa.get(faces, 0)
-                f1 := sa.get(faces, counter_clockwise ? i + 1 : i)
-                f2 := sa.get(faces, counter_clockwise ? i : i + 1)
+                f1 := sa.get(faces, flip_winding ? i + 1 : i)
+                f2 := sa.get(faces, flip_winding ? i : i + 1)
 
                 p0 := positions[f0.position_index]
                 p1 := positions[f1.position_index]
@@ -242,64 +243,191 @@ load_wavefront_model :: proc(path: string, counter_clockwise := true, scale: f32
         fmt.printfln("[INFO] - min: {: 7.3f}", v_min)
         fmt.printfln("[INFO] - max: {: 7.3f}", v_max)
     }
+
+    load_wavefront_materials :: proc(path: string) -> (textures: []Texture, textures_lookup: map[string]int) {
+
+        dir, _ := filepath.split(path)
+
+        fmt.printfln("[INFO] Reading wavefront material library: {}", path)
+
+        data, data_ok := os.read_entire_file(path, context.allocator)
+        panic_on_error(data_ok)
+        defer delete(data)
+
+        materials: map[string]string
+        defer delete(materials)
+
+        name: string
+
+        text_it := cast(string)data
+        for line in strings.split_lines_iterator(&text_it) {
+
+            parts: [dynamic]string
+            defer delete(parts)
+
+            line_it := line
+            for part in strings.split_iterator(&line_it, " ") {
+                (len(part) > 0) or_continue
+                append(&parts, part)
+            }
+
+            // Skip empty lines.
+            if len(parts) == 0 do continue
+
+            switch parts[0] {
+            case "newmtl":
+                name = strings.clone(parts[1], context.temp_allocator)
+                materials[name] = ""
+            case "map_Kd":
+                materials[name] = normalize_path_slash(
+                    filepath.join({dir, parts[1]}, context.temp_allocator),
+                    context.temp_allocator,
+                )
+            }
+        }
+
+        textures = make([]Texture, len(materials))
+
+        index: int
+        for material_name, material_path in materials {
+            if material_path == "" {
+                fmt.eprintfln("[WARN] Material '{}' did not have a texture, defaulting to 1x1 white.", material_name)
+                textures[index] = to_texture(image_clone_aligned({WHITE}, 1, 1))
+            } else {
+                textures[index] = to_texture(image_load_path(material_path))
+            }
+            textures_lookup[material_name] = index
+            index += 1
+        }
+
+        return
+    }
 }
 
-@(private)
-load_wavefront_materials :: proc(path: string) -> (textures: []Texture, textures_lookup: map[string]int) {
+load_gltf_model :: proc(path: string, scale: f32 = 1.0) -> Model {
 
-    dir, _ := filepath.split(path)
+    path_ := strings.clone_to_cstring(path, context.temp_allocator)
 
-    fmt.printfln("[INFO] Reading wavefront material library: {}", path)
+    options: cgltf.options
+    data, data_err := cgltf.parse_file(options, path_)
+    panic_on_error(data_err)
+    defer cgltf.free(data)
 
-    data, data_ok := os.read_entire_file(path, context.allocator)
-    panic_on_error(data_ok)
-    defer delete(data)
+    panic_on_error(cgltf.load_buffers(options, data, path_))
 
-    materials: map[string]string
-    defer delete(materials)
+    // fmt.printfln("- asset: {}", data.asset)
+    // fmt.printfln("- type: {}", data.file_type)
+    // fmt.printfln("- {} meshes", len(data.meshes))
+    // fmt.printfln("- {} animations", len(data.animations))
+    // fmt.printfln("- {} textures", len(data.textures))
+    // fmt.printfln("- {} materials", len(data.materials))
 
-    name: string
+    out_meshes: [dynamic]Mesh
+    out_textures: [dynamic]Texture
 
-    text_it := cast(string)data
-    for line in strings.split_lines_iterator(&text_it) {
+    // fmt.printfln("- mesh: {}", mesh)
+    for mesh in data.meshes {
 
-        parts: [dynamic]string
-        defer delete(parts)
+        // fmt.printfln("- primitives: {}", mesh.primitives)
+        for primitive in mesh.primitives {
+            assert(primitive.type == .triangles)
 
-        line_it := line
-        for part in strings.split_iterator(&line_it, " ") {
-            (len(part) > 0) or_continue
-            append(&parts, part)
-        }
+            // Find primary attributes.
+            positions, positions_ok := find_accessor(primitive, .position)
+            normals, normals_ok := find_accessor(primitive, .normal)
+            uvs, uvs_ok := find_accessor(primitive, .texcoord)
 
-        // Skip empty lines.
-        if len(parts) == 0 do continue
+            panic_on_error(positions_ok)
+            panic_on_error(normals_ok)
+            panic_on_error(uvs_ok)
 
-        switch parts[0] {
-        case "newmtl":
-            name = strings.clone(parts[1], context.temp_allocator)
-            materials[name] = ""
-        case "map_Kd":
-            materials[name] = normalize_path_slash(
-                filepath.join({dir, parts[1]}, context.temp_allocator),
-                context.temp_allocator,
-            )
+            // Find skin attributes.
+            skin_joints, skin_joints_ok := find_accessor(primitive, .joints)
+            skin_weights, skin_weights_ok := find_accessor(primitive, .weights)
+
+            panic_on_error(skin_joints_ok == skin_weights_ok)
+
+            // TODO: Support skinned meshes
+            _, _ = skin_joints, skin_weights
+
+            // ---
+
+            ensure(positions.data.component_type == .r_32f)
+            ensure(positions.data.type == .vec3)
+            ensure(!positions.data.normalized)
+
+            ensure(normals.data.component_type == .r_32f)
+            ensure(normals.data.type == .vec3)
+            ensure(!normals.data.normalized)
+
+            ensure(uvs.data.component_type == .r_32f)
+            ensure(uvs.data.type == .vec2)
+            ensure(!uvs.data.normalized)
+
+            indices: [dynamic]int
+            for i_index in 0 ..< primitive.indices.count {
+                index := cgltf.accessor_read_index(primitive.indices, i_index)
+                append(&indices, cast(int)index)
+            }
+
+            vertices: [dynamic]Vertex
+            for index in 0 ..< positions.data.count {
+                vertex: Vertex
+                panic_on_error(cgltf.accessor_read_float(positions.data, index, raw_data(vertex.position[:]), 3))
+                panic_on_error(cgltf.accessor_read_float(normals.data, index, raw_data(vertex.normal[:]), 3))
+                panic_on_error(cgltf.accessor_read_float(uvs.data, index, raw_data(vertex.uv[:]), 2))
+
+                vertex.position *= scale
+
+                append(&vertices, vertex)
+            }
+
+            // primitive.material.alpha_mode
+            // primitive.material.alpha_cutoff
+            // primitive.material.double_sided
+            // primitive.material.unlit
+            // primitive.material.emissive_texture
+            // primitive.material.emissive_strength
+            // primitive.material.emissive_factor
+
+            pbr_color_texture := primitive.material.pbr_metallic_roughness.base_color_texture
+
+            texture := pbr_color_texture.texture
+            image := texture.image_
+
+            // TODO: Incorporate
+            sampler := texture.sampler
+            // sampler.wrap_t == .repeat
+            // sampler.wrap_s
+            // sampler.min_filter
+            // sampler.mag_filter
+            _ = sampler
+
+            // TODO: Cache load by material image pointer
+            image_bytes := cgltf.buffer_view_data(image.buffer_view)[:image.buffer_view.size]
+            png_image := image_load_bytes(image_bytes)
+            out_texture := to_texture(png_image)
+
+            out_mesh := Mesh {
+                indices  = indices[:],
+                vertices = vertices[:],
+            }
+            append(&out_meshes, out_mesh)
+            append(&out_textures, out_texture)
         }
     }
 
-    textures = make([]Texture, len(materials))
-
-    index: int
-    for material_name, material_path in materials {
-        if material_path == "" {
-            fmt.eprintfln("[WARN] Material '{}' did not have a texture, defaulting to 1x1 white.", material_name)
-            textures[index] = to_texture(image_clone_aligned({WHITE}, 1, 1))
-        } else {
-            textures[index] = to_texture(image_load(material_path))
-        }
-        textures_lookup[material_name] = index
-        index += 1
+    model := Model {
+        meshes   = out_meshes[:],
+        textures = out_textures[:],
     }
 
-    return
+    return model
+
+    find_accessor :: proc(primitive: cgltf.primitive, type: cgltf.attribute_type) -> (^cgltf.attribute, bool) {
+        for &attr in primitive.attributes {
+            if attr.type == type do return &attr, true
+        }
+        return nil, false
+    }
 }

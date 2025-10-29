@@ -190,8 +190,8 @@ draw_mesh_indexed :: proc(mesh: Mesh, image: ^Texture, transform: Matrix) #no_bo
 
         for i := info.begin; i < info.end; i += 3 {
             a := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 0]], info.transform)
-            b := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 2]], info.transform) // TODO: ???
-            c := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 1]], info.transform)
+            b := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 1]], info.transform)
+            c := compute_vertex(info.mesh.vertices[info.mesh.indices[i + 2]], info.transform)
             process_triangle({a, b, c}, info.image, &batch)
         }
 
