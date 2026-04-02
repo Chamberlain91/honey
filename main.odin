@@ -6,7 +6,7 @@ import "core:math"
 import la "core:math/linalg"
 @(require) import "core:mem"
 
-RESOLUTION_FACTOR :: 4 // 4 = 1080p
+RESOLUTION_FACTOR :: 3 // 4 = 1080p
 SCREEN_W :: 480 * RESOLUTION_FACTOR
 SCREEN_H :: 270 * RESOLUTION_FACTOR
 

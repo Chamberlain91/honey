@@ -3,7 +3,7 @@ package honey
 import sa "core:container/small_array"
 import "core:fmt"
 import la "core:math/linalg"
-import os "core:os/os2"
+import "core:os"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
@@ -87,11 +87,9 @@ load_wavefront_model :: proc(path: string, flip_winding := false, scale: f32 = 1
         switch parts[0] {
 
         case "mtllib":
+            joined, _ := filepath.join({dir, parts[1]}, context.temp_allocator)
             // Loads the referenced material library.
-            matlib_path, matlib_path_err := normalize_path_slash(
-                filepath.join({dir, parts[1]}, context.temp_allocator),
-                context.temp_allocator,
-            )
+            matlib_path, matlib_path_err := normalize_path_slash(joined, context.temp_allocator)
             panic_on_error(matlib_path_err)
             textures, texture_lookup = load_wavefront_materials(matlib_path)
             builders = make([]Mesh_Builder, len(textures))
@@ -279,10 +277,8 @@ load_wavefront_model :: proc(path: string, flip_winding := false, scale: f32 = 1
                 name = strings.clone(parts[1], context.temp_allocator)
                 materials[name] = ""
             case "map_Kd":
-                materials[name] = normalize_path_slash(
-                    filepath.join({dir, parts[1]}, context.temp_allocator),
-                    context.temp_allocator,
-                )
+                joined, _ := filepath.join({dir, parts[1]}, context.temp_allocator)
+                materials[name] = normalize_path_slash(joined, context.temp_allocator)
             }
         }
 

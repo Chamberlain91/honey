@@ -28,16 +28,21 @@ Mesh :: struct {
 @(private)
 thread_init :: proc() {
 
-    fmt.printfln("[SYSTEM] OS: {}", sysinfo.os_version.as_string)
-    fmt.printfln(
-        "[SYSTEM] CPU: {} ({} physical, {} logical)",
-        sysinfo.cpu.name,
-        sysinfo.cpu.physical_cores,
-        sysinfo.cpu.logical_cores,
-    )
-    fmt.printfln("[SYSTEM] RAM: {:M}", sysinfo.ram.total_ram)
+    // fmt.printfln("[SYSTEM] OS: {}", sysinfo.os_version.as_string)
+    // fmt.printfln(
+    //     "[SYSTEM] CPU: {} ({} physical, {} logical)",
+    //     sysinfo.cpu.name,
+    //     sysinfo.cpu.physical_cores,
+    //     sysinfo.cpu.logical_cores,
+    // )
+    // fmt.printfln("[SYSTEM] RAM: {:M}", sysinfo.ram.total_ram)
 
-    thread.pool_init(&_ctx.pool, context.allocator, max(2, sysinfo.cpu.logical_cores))
+    _, logical_cores, ok := sysinfo.cpu_core_count()
+    if !ok {
+        logical_cores = 8
+    }
+
+    thread.pool_init(&_ctx.pool, context.allocator, max(2, logical_cores))
     thread.pool_start(&_ctx.pool)
 
     fmt.printfln("[INFO] Started thread pool with {} workers.", len(_ctx.pool.threads))
